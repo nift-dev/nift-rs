@@ -140,6 +140,15 @@ impl Value {
             None
         }
     }
+    /// Mutable number read.
+    pub fn as_number_mut(&mut self) -> Option<&mut f64> {
+        if let Value::Number(value) = self {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
     pub fn as_object_mut(&mut self) -> Option<&mut IndexMap<String, Value>> {
         if let Value::Object(value) = self {
             Some(value)

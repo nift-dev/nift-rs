@@ -542,7 +542,7 @@ fn parse(
 /// renders as `to_chars(general, 15)` (fixed notation when the decimal
 /// exponent is in [-4, 15), otherwise scientific with a signed two-digit
 /// exponent, trailing zeros stripped).
-fn format_number(n: f64) -> String {
+pub(crate) fn format_number(n: f64) -> String {
     if n.is_finite() && n.fract() == 0.0 && n >= -(2f64.powi(63)) && n < 2f64.powi(63) {
         return format!("{}", n as i64);
     }
@@ -713,7 +713,12 @@ fn lexically_normal(path: &Path) -> PathBuf {
     result
 }
 
-fn find_balanced(text: &str, open: usize, open_char: u8, close_char: u8) -> Option<usize> {
+pub(crate) fn find_balanced(
+    text: &str,
+    open: usize,
+    open_char: u8,
+    close_char: u8,
+) -> Option<usize> {
     let bytes = text.as_bytes();
     if open >= text.len() || bytes[open] != open_char {
         return None;
