@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/nift"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+
+# Programme-wide safety policy: unsafe is forbidden in every crate in this
+# workspace and is not locally overridable. Changing this requires explicit
+# architectural review with evidence (see docs/safety.md).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

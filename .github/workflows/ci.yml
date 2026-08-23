@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Verify canonical corpus mirror integrity
+        run: bash corpus/sync_corpus.sh verify
+      - name: Forbid unsafe (belt-and-braces)
+        run: |
+          grep -q 'forbid(unsafe_code)' crates/nift/src/lib.rs || { echo 'missing #![forbid(unsafe_code)]' >&2; exit 1; }
+          grep -q 'unsafe_code = "forbid"' Cargo.toml || { echo 'missing workspace forbid lint' >&2; exit 1; }
