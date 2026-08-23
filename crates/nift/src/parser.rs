@@ -243,8 +243,8 @@ fn parse(
                 )
             })?;
 
-            let condition_value =
-                evaluate_condition(host, &text[i + 4..condition_close]).map_err(|e| {
+            let condition_value = evaluate_condition(host, identity, &text[i + 4..condition_close])
+                .map_err(|e| {
                     if e.source.is_none() {
                         error_at(ErrorKind::Parse, e.message, text, i, source_path)
                     } else {
@@ -316,21 +316,18 @@ fn parse(
                             )
                         })?;
                     if !selected {
-                        branch_condition =
-                            evaluate_condition(host, &text[cursor + 1..else_condition_close])
-                                .map_err(|e| {
-                                    if e.source.is_none() {
-                                        error_at(
-                                            ErrorKind::Parse,
-                                            e.message,
-                                            text,
-                                            cursor,
-                                            source_path,
-                                        )
-                                    } else {
-                                        e
-                                    }
-                                })?;
+                        branch_condition = evaluate_condition(
+                            host,
+                            identity,
+                            &text[cursor + 1..else_condition_close],
+                        )
+                        .map_err(|e| {
+                            if e.source.is_none() {
+                                error_at(ErrorKind::Parse, e.message, text, cursor, source_path)
+                            } else {
+                                e
+                            }
+                        })?;
                     }
                     cursor = else_condition_close + 1;
                 }
@@ -636,16 +633,66 @@ fn lookup<'h>(host: &'h dyn RenderHost, key: &str) -> Result<Lookup<'h>, RenderE
 }
 
 /// Scalar rendering: strings verbatim; numbers/bools/null as compact JSON
-/// (matching the reference). Integer-valued doubles render as integers.
+/// (matching the reference). Number formatting reproduces the reference's
+/// `std::to_chars` rules exactly, verified against a differential battery
+/// captured from the frozen C++ reference (tests/number_formatting.rs):
+/// integer-valued doubles within i64 range render as integers; everything else
+/// renders as `to_chars(general, 15)` (fixed notation when the decimal
+/// exponent is in [-4, 15), otherwise scientific with a signed two-digit
+/// exponent, trailing zeros stripped).
 fn format_number(n: f64) -> String {
     if n.is_finite() && n.fract() == 0.0 && n >= -(2f64.powi(63)) && n < 2f64.powi(63) {
-        format!("{}", n as i64)
+        return format!("{}", n as i64);
+    }
+    if !n.is_finite() {
+        // inf/nan cannot arise from JSON; not part of the reference corpus.
+        return format!("{}", n);
+    }
+    format_general15(n)
+}
+
+/// `std::to_chars(value, general, 15)`-equivalent formatting.
+fn format_general15(n: f64) -> String {
+    // 15 significant digits in scientific form (1 digit before the point,
+    // 14 after), with round-half-even rounding matching the reference.
+    let sci = format!("{:.14e}", n);
+    let (mantissa, exponent) = sci.split_once('e').expect("e-notation always contains 'e'");
+    let exp: i32 = exponent.parse().expect("valid decimal exponent");
+    let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+    if (-4..15).contains(&exp) {
+        fixed_notation(mantissa, exp)
     } else {
-        // Rust's shortest-roundtrip formatting. This may differ from the
-        // reference's std::to_chars(general, 15) for extreme non-integers;
-        // recorded for the NR3/differential reconciliation, and the 9 goldens
-        // do not pin non-integer number rendering.
-        format!("{}", n)
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{}e{}{:02}", mantissa, sign, exp.abs())
+    }
+}
+
+/// Convert a mantissa (in [1,10), possibly signed) and decimal exponent to
+/// fixed notation with trailing zeros stripped.
+fn fixed_notation(mantissa: &str, exp: i32) -> String {
+    let (sign, digits) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let digits = digits.replace('.', "");
+    let point_pos = 1 + exp; // number of digits before the decimal point
+    if point_pos <= 0 {
+        format!("{}0.{}{}", sign, "0".repeat((-point_pos) as usize), digits)
+    } else if point_pos as usize >= digits.len() {
+        format!(
+            "{}{}{}",
+            sign,
+            digits,
+            "0".repeat(point_pos as usize - digits.len())
+        )
+    } else {
+        let int_part = &digits[..point_pos as usize];
+        let frac_part = digits[point_pos as usize..].trim_end_matches('0');
+        if frac_part.is_empty() {
+            format!("{}{}", sign, int_part)
+        } else {
+            format!("{}{}.{}", sign, int_part, frac_part)
+        }
     }
 }
 
@@ -696,10 +743,17 @@ fn metadata(host: &dyn RenderHost, identity: &RenderIdentity, key: &str) -> Opti
     }
 }
 
-/// NR2 condition evaluator: scalar literals and plain value lookups with
-/// reference truthiness (bool, null, number!=0, non-empty string/array/object).
-/// Comparisons, negation and expression functions are NR3.
-fn evaluate_condition(host: &dyn RenderHost, expression: &str) -> Result<bool, RenderError> {
+/// NR2 condition evaluator: scalar literals, plain value lookups and built-in
+/// metadata, with reference truthiness (bool, null, number!=0, non-empty
+/// string/array/object). The semantic resolution layers mirror `$[...]`:
+/// host binding > built-in metadata (so a Context/Engine title binding still
+/// beats the built-in title metadata). Comparisons, negation and expression
+/// functions are NR3.
+fn evaluate_condition(
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    expression: &str,
+) -> Result<bool, RenderError> {
     let expression = expression.trim();
     if expression.is_empty() {
         return Err(RenderError::new(
@@ -712,10 +766,17 @@ fn evaluate_condition(host: &dyn RenderHost, expression: &str) -> Result<bool, R
     }
     match lookup(host, expression)? {
         Lookup::Found(value) => Ok(truthy(value)),
-        Lookup::Unknown => Err(RenderError::new(
-            ErrorKind::Render,
-            format!("unknown value or malformed expression: {expression}"),
-        )),
+        Lookup::Unknown => {
+            if built_in_metadata_name(expression) {
+                if let Some(value) = metadata(host, identity, expression) {
+                    return Ok(!value.is_empty());
+                }
+            }
+            Err(RenderError::new(
+                ErrorKind::Render,
+                format!("unknown value or malformed expression: {expression}"),
+            ))
+        }
     }
 }
 

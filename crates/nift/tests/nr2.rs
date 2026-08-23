@@ -378,6 +378,50 @@ fn if_block_indentation_is_structural_not_output() {
 }
 
 #[test]
+fn if_resolves_built_in_metadata() {
+    let defaults = Bindings::new();
+    let context = Context::new();
+    let host = host(&defaults, &context);
+    // Reference-derived: @if can see built-in metadata, like $[...].
+    assert_eq!(render_text(&host, "@if(title){T} else {F}"), "T");
+    assert_eq!(render_text(&host, "@if(name){T} else {F}"), "T");
+    assert_eq!(render_text(&host, "@if(content-path){T} else {F}"), "T");
+    assert_eq!(render_text(&host, "@if(output-path){T} else {F}"), "T");
+
+    // A naturally-empty metadata case: no title set -> falsy.
+    let empty_identity = RenderIdentity::new().name("about");
+    let result = render(
+        &host,
+        &empty_identity,
+        &Source::text("@if(title){T} else {F}"),
+        None,
+    )
+    .expect("render should succeed");
+    assert_eq!(result.output, "F");
+}
+
+#[test]
+fn if_host_binding_beats_built_in_metadata() {
+    let mut defaults = Bindings::new();
+    defaults
+        .set("title", Value::string("default-title"))
+        .unwrap();
+    let context = Context::new();
+    let default_host = host(&defaults, &context);
+    // No context overlay: the engine-default title binding wins over the
+    // built-in title metadata.
+    assert_eq!(render_text(&default_host, "@if(title){T} else {F}"), "T");
+
+    // A context overlay overrides: an empty context title binding makes the
+    // condition false even though the built-in title is non-empty (binding
+    // resolution precedes built-in metadata).
+    let mut empty_title_context = Context::new();
+    empty_title_context.set("title", Value::string("")).unwrap();
+    let empty_host = host(&defaults, &empty_title_context);
+    assert_eq!(render_text(&empty_host, "@if(title){T} else {F}"), "F");
+}
+
+#[test]
 fn if_condition_errors() {
     let defaults = Bindings::new();
     let context = Context::new();
