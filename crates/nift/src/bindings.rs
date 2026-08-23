@@ -50,15 +50,17 @@ impl Bindings {
     }
 
     /// Insert (or overwrite) a binding. Returns
-    /// [`BindingError::InvalidIdentifier`] for an invalid name and
-    /// [`BindingError::StructuralBuiltin`] for a structural built-in.
+    /// [`BindingError::StructuralBuiltin`] for a structural built-in (checked
+    /// first, so hyphenated structural names such as `content-path` are
+    /// classified correctly) and [`BindingError::InvalidIdentifier`] for any
+    /// other invalid name.
     pub fn set(&mut self, name: impl Into<String>, value: Value) -> Result<(), BindingError> {
         let name = name.into();
-        if !valid_binding_identifier(&name) {
-            return Err(BindingError::InvalidIdentifier);
-        }
         if structural_builtin_name(&name) {
             return Err(BindingError::StructuralBuiltin);
+        }
+        if !valid_binding_identifier(&name) {
+            return Err(BindingError::InvalidIdentifier);
         }
         self.map.insert(name, value);
         Ok(())
@@ -128,6 +130,12 @@ mod tests {
         );
         assert_eq!(
             bindings.set("name", Value::null()),
+            Err(BindingError::StructuralBuiltin)
+        );
+        // Hyphenated structural built-ins are StructuralBuiltin, not
+        // InvalidIdentifier.
+        assert_eq!(
+            bindings.set("content-path", Value::null()),
             Err(BindingError::StructuralBuiltin)
         );
         assert_eq!(bindings.len(), 1);
