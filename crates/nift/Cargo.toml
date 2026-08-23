@@ -12,3 +12,7 @@ categories = ["template-engine"]
 workspace = true
 
 [dependencies]
+# Insertion-ordered object map: the frozen reference stores JSON objects as an
+# ordered document (member order = insertion/document order), which affects
+# template rendering when objects are iterated.
+indexmap = "2"

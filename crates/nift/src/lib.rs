@@ -6,28 +6,32 @@
 //! contract**, not a wrapper around the C++ Nift library and not a line-by-line
 //! transliteration of the C++ implementation. The frozen canonical conformance
 //! corpus is the semantic authority; the C++ implementation is an archaeology
-//! reference only (see `docs/authorities.md`).
+//! reference only (see `docs/authorities.md` in the repository root).
 //!
 //! Safety: the core crate forbids `unsafe` code (`#![forbid(unsafe_code)]`,
 //! mirrored by the workspace lint). No `unsafe` may be introduced without an
-//! explicit architectural decision and review (see `docs/safety.md`).
+//! explicit architectural decision and review. Malformed/external input is
+//! handled as `Result`/error values, never panics.
 //!
-//! This is the NR0 baseline: the crate skeleton, safety policy, shared-corpus
-//! arrangement, authorities document, complete semantic inventory and
-//! checkpoint/evidence mapping. No template-language functionality is
-//! implemented yet (NR1+).
+//! # NR1 status
+//!
+//! This checkpoint implements only the frozen foundational Rust model:
+//! the value data model, request context, source input, typed errors/results,
+//! engine-default bindings and the foundational precedence contract. No Nift
+//! template parser or directive is implemented yet (NR2+). Notably absent
+//! until their owning checkpoints: template/JSON parsing (NR4), `@json`-style
+//! `set_json` text handling (NR4), and the `Engine` serving surface (NR6).
 
-/// Baseline placeholder so the crate has a linkable unit before NR1.
-///
-/// Removed once the first real API lands.
-pub fn __nr0_baseline_marker() -> u32 {
-    0
-}
+pub mod bindings;
+pub mod context;
+pub mod error;
+pub mod result;
+pub mod source;
+pub mod value;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn nr0_baseline_compiles() {
-        assert_eq!(super::__nr0_baseline_marker(), 0);
-    }
-}
+pub use bindings::{resolve, structural_builtin_name, valid_binding_identifier, Bindings};
+pub use context::Context;
+pub use error::{BindingError, ErrorKind, RenderError};
+pub use result::RenderResult;
+pub use source::Source;
+pub use value::{Value, ValueError};
