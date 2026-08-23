@@ -41,6 +41,23 @@ fn render_template(template: &str) -> String {
     obj.insert("b", Value::number(2.0)).unwrap();
     obj.insert("a", Value::number(1.0)).unwrap();
     defaults.set("obj", obj).unwrap();
+    let mut sort_obj = Value::object();
+    sort_obj.insert("b", Value::number(3.0)).unwrap();
+    sort_obj.insert("a", Value::number(1.0)).unwrap();
+    sort_obj.insert("c", Value::number(2.0)).unwrap();
+    defaults.set("sortobj", sort_obj).unwrap();
+    let mut nested = Value::object();
+    for (key, rank) in [("first", 3.0), ("second", 1.0), ("third", 2.0)] {
+        let mut entry = Value::object();
+        entry.insert("rank", Value::number(rank)).unwrap();
+        nested.insert(key, entry).unwrap();
+    }
+    defaults.set("nested", nested).unwrap();
+    let mut dup = Value::object();
+    dup.insert("x", Value::number(1.0)).unwrap();
+    dup.insert("y", Value::number(1.0)).unwrap();
+    dup.insert("z", Value::number(2.0)).unwrap();
+    defaults.set("dup", dup).unwrap();
     let context = Context::new();
     let host = make_host(&defaults, &context);
     let identity = RenderIdentity::new().name("t").title("T");
@@ -61,6 +78,18 @@ fn render_template_err(template: &str) -> nift::RenderError {
             ]),
         )
         .unwrap();
+    let mut sort_obj = Value::object();
+    sort_obj.insert("b", Value::number(3.0)).unwrap();
+    sort_obj.insert("a", Value::number(1.0)).unwrap();
+    sort_obj.insert("c", Value::number(2.0)).unwrap();
+    defaults.set("sortobj", sort_obj).unwrap();
+    let mut nested = Value::object();
+    for (key, rank) in [("first", 3.0), ("second", 1.0), ("third", 2.0)] {
+        let mut entry = Value::object();
+        entry.insert("rank", Value::number(rank)).unwrap();
+        nested.insert(key, entry).unwrap();
+    }
+    defaults.set("nested", nested).unwrap();
     let context = Context::new();
     let host = make_host(&defaults, &context);
     let identity = RenderIdentity::new().name("t").title("T");
@@ -207,4 +236,75 @@ fn substr_and_join_errors() {
     assert!(error
         .message
         .contains("first parameter must resolve to a JSON array"));
+}
+
+#[test]
+fn for_object_sorting() {
+    // Reference-derived: object loops accept and APPLY sort clauses. Insertion
+    // order is b,a,c; sorted orders differ so a no-op sorter cannot pass.
+    assert_eq!(
+        render_template(
+            "@for((k, v) : sortobj by k asc){$[k]}@for((k, v) : sortobj by k desc){$[k]}|"
+        ),
+        "abccba|"
+    );
+    assert_eq!(
+        render_template(
+            "@for((k, v) : sortobj by v asc){$[k]}@for((k, v) : sortobj by v desc){$[k]}|"
+        ),
+        "acbbca|"
+    );
+    // Nested value-field sort root (value_name.<path>).
+    assert_eq!(
+        render_template("@for((k, v) : nested by v.rank asc){$[k]}|"),
+        "secondthirdfirst|"
+    );
+    // Equal sort keys are stable (insertion order preserved within ties).
+    assert_eq!(
+        render_template("@for((k, v) : dup by v asc){$[k]}|"),
+        "xyz|"
+    );
+}
+
+#[test]
+fn for_object_sort_negative_cases() {
+    // Unsupported sort root (unbounded name).
+    let error = render_template_err("@for((k, v) : sortobj by q asc){$[k]}");
+    assert!(error
+        .message
+        .contains("object sort key must begin with key/value binding"));
+    // Missing sort path member (reference: hard navigation error).
+    let error = render_template_err("@for((k, v) : nested by v.missing asc){$[k]}");
+    assert!(error.message.contains("has no member 'missing'"));
+}
+
+#[test]
+fn missing_member_navigation_is_a_hard_error() {
+    // Reference: a known root with a missing member errors (unlike an unknown
+    // root, which falls through to literal emission).
+    let mut defaults = Bindings::new();
+    let mut obj = Value::object();
+    obj.insert("b", Value::number(2.0)).unwrap();
+    defaults.set("obj", obj).unwrap();
+    let context = Context::new();
+    let host = make_host(&defaults, &context);
+    let identity = RenderIdentity::new().name("t").title("T");
+    let error = render(&host, &identity, &Source::text("$[obj.missing]"), None)
+        .expect_err("missing member must be a hard error");
+    assert!(error
+        .message
+        .contains("JSON value 'obj' has no member 'missing'"));
+    let error = render(&host, &identity, &Source::text("$[obj.c]"), None)
+        .expect_err("missing nested member must be a hard error");
+    assert!(error.message.contains("has no member 'c'"));
+    // Out-of-range element is a hard error.
+    let mut defaults = Bindings::new();
+    defaults
+        .set("arr", Value::Array(vec![Value::number(1.0)]))
+        .unwrap();
+    let context = Context::new();
+    let host = make_host(&defaults, &context);
+    let error = render(&host, &identity, &Source::text("$[arr[5]]"), None)
+        .expect_err("out-of-range element must be a hard error");
+    assert!(error.message.contains("out of range"));
 }

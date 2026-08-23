@@ -72,6 +72,7 @@ pub fn resolve_json_value(
     while pos < bytes.len() {
         let c = bytes[pos];
         if c == b'.' {
+            let dot_pos = pos;
             pos += 1;
             let start = pos;
             while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
@@ -81,7 +82,17 @@ pub fn resolve_json_value(
             match &current {
                 Value::Object(map) => match map.get(member) {
                     Some(next) => current = next.clone(),
-                    None => return Ok(None),
+                    None => {
+                        // Reference message: the path prefix up to the '.'.
+                        return Err(RenderError::new(
+                            ErrorKind::Render,
+                            format!(
+                                "JSON value '{}' has no member '{}'",
+                                &text[..dot_pos],
+                                member
+                            ),
+                        ));
+                    }
                 },
                 _ => {
                     return Err(RenderError::new(
@@ -99,26 +110,35 @@ pub fn resolve_json_value(
                 pos += 1;
             }
             if pos == start || pos >= bytes.len() || bytes[pos] != b']' {
-                return Ok(None);
+                return Err(RenderError::new(
+                    ErrorKind::Render,
+                    format!("JSON array indices must be non-negative integers in '{text}'"),
+                ));
             }
             let index = text[start..pos].parse::<usize>().unwrap_or(usize::MAX);
             pos += 1;
             match &current {
                 Value::Array(array) => match array.get(index) {
                     Some(next) => current = next.clone(),
-                    None => return Ok(None),
+                    None => {
+                        return Err(RenderError::new(
+                            ErrorKind::Render,
+                            format!("JSON array index {index} is out of range in '{text}'"),
+                        ));
+                    }
                 },
                 _ => {
                     return Err(RenderError::new(
                         ErrorKind::Render,
-                        format!(
-                            "cannot access element {index} because the current JSON value is not an array"
-                        ),
+                        format!("cannot index JSON value in '{text}' because it is not an array"),
                     ));
                 }
             }
         } else {
-            return Ok(None);
+            return Err(RenderError::new(
+                ErrorKind::Render,
+                format!("invalid JSON access syntax in '{text}'"),
+            ));
         }
     }
 

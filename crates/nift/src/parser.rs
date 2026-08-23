@@ -376,10 +376,19 @@ fn parse(
                             };
                             let key = match key_result {
                                 Ok(Some(key)) => key,
-                                _ => {
+                                Ok(None) => {
                                     return Err(error_at(
                                         ErrorKind::Render,
                                         "@for sort key is not a bound JSON path",
+                                        text,
+                                        i,
+                                        source_path,
+                                    ));
+                                }
+                                Err(error) => {
+                                    return Err(error_at(
+                                        ErrorKind::Render,
+                                        error.message,
                                         text,
                                         i,
                                         source_path,
@@ -422,6 +431,7 @@ fn parse(
 
                     let prior_element = state.json_bindings.get(binding_part).cloned();
                     let prior_loop = state.json_bindings.get("loop").cloned();
+                    let mut iteration_error: Option<RenderError> = None;
                     for (position, &index) in order.iter().enumerate() {
                         let element = &array[index];
                         state
@@ -431,27 +441,36 @@ fn parse(
                             "loop".to_string(),
                             make_loop_metadata(position, array.len()),
                         );
-                        let nested =
-                            parse(state, host, identity, page, &body, source_path, depth + 1)?;
-                        append_indented(
-                            &mut output,
-                            &nested,
-                            &control_indent,
-                            insertion_code_block_depth,
-                        );
-                        if body_multiline && position + 1 < order.len() {
-                            output.push('\n');
-                            output.push_str(&control_indent);
+                        match parse(state, host, identity, page, &body, source_path, depth + 1) {
+                            Ok(nested) => {
+                                append_indented(
+                                    &mut output,
+                                    &nested,
+                                    &control_indent,
+                                    insertion_code_block_depth,
+                                );
+                                if body_multiline && position + 1 < order.len() {
+                                    output.push('\n');
+                                    output.push_str(&control_indent);
+                                }
+                            }
+                            Err(error) => {
+                                iteration_error = Some(error);
+                                break;
+                            }
                         }
                     }
-                    match prior_element {
-                        Some(value) => state.json_bindings.insert(binding_part.to_string(), value),
-                        None => state.json_bindings.shift_remove(binding_part),
-                    };
-                    match prior_loop {
-                        Some(value) => state.json_bindings.insert("loop".to_string(), value),
-                        None => state.json_bindings.shift_remove("loop"),
-                    };
+                    restore_binding(&mut state.json_bindings, binding_part, prior_element);
+                    restore_binding(&mut state.json_bindings, "loop", prior_loop);
+                    if let Some(error) = iteration_error {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            error.message,
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
                     i = block_close + 1;
                     continue;
                 }
@@ -516,11 +535,15 @@ fn parse(
                         || sort_expression == key_name
                         || sort_expression == value_name
                         || sort_expression.starts_with(&format!("{key_name}."))
-                        || sort_expression.starts_with(&format!("{key_name}["));
+                        || sort_expression.starts_with(&format!("{key_name}["))
+                        || sort_expression.starts_with(&format!("{value_name}."))
+                        || sort_expression.starts_with(&format!("{value_name}["));
                     if !valid_object_sort_root {
                         return Err(error_at(
                             ErrorKind::Parse,
-                            "@for object sort key must be the key or value binding",
+                            format!(
+                                "@for object sort key must begin with key/value binding '{key_name}' or '{value_name}'"
+                            ),
                             text,
                             i,
                             source_path,
@@ -529,7 +552,101 @@ fn parse(
                     let prior_key = state.json_bindings.get(key_name).cloned();
                     let prior_value = state.json_bindings.get(value_name).cloned();
                     let prior_loop = state.json_bindings.get("loop").cloned();
-                    for (position, (object_key, object_value)) in object.iter().enumerate() {
+
+                    let mut order: Vec<usize> = (0..object.len()).collect();
+                    if !sort_expression.is_empty() {
+                        let mut sort_keys: Vec<Value> = Vec::new();
+                        let mut key_type: Option<std::mem::Discriminant<Value>> = None;
+                        let mut sort_error: Option<RenderError> = None;
+                        for (n, (object_key, object_value)) in object.iter().enumerate() {
+                            state
+                                .json_bindings
+                                .insert(key_name.to_string(), Value::string(object_key.clone()));
+                            state
+                                .json_bindings
+                                .insert(value_name.to_string(), object_value.clone());
+                            let key_result = crate::expr::resolve_json_value(
+                                &state.json_bindings,
+                                host,
+                                &sort_expression,
+                            );
+                            state.json_bindings.insert(
+                                key_name.to_string(),
+                                prior_key.clone().unwrap_or(Value::null()),
+                            );
+                            state.json_bindings.insert(
+                                value_name.to_string(),
+                                prior_value.clone().unwrap_or(Value::null()),
+                            );
+                            let key = match key_result {
+                                Ok(Some(key)) => key,
+                                Ok(None) => {
+                                    sort_error = Some(RenderError::new(
+                                        ErrorKind::Render,
+                                        format!(
+                                            "@for sort key is not a bound JSON path: {sort_expression}"
+                                        ),
+                                    ));
+                                    break;
+                                }
+                                Err(error) => {
+                                    sort_error = Some(error);
+                                    break;
+                                }
+                            };
+                            if !key.is_number() && !key.is_string() {
+                                sort_error = Some(RenderError::new(
+                                    ErrorKind::Render,
+                                    format!(
+                                        "@for sort keys must all be numbers or all be strings: {sort_expression}"
+                                    ),
+                                ));
+                                break;
+                            }
+                            match key_type {
+                                None => key_type = Some(std::mem::discriminant(&key)),
+                                Some(t) if t != std::mem::discriminant(&key) => {
+                                    sort_error = Some(RenderError::new(
+                                        ErrorKind::Render,
+                                        format!(
+                                            "@for sort keys must have the same type: {sort_expression}"
+                                        ),
+                                    ));
+                                    break;
+                                }
+                                Some(_) => {}
+                            }
+                            sort_keys.push(key);
+                            let _ = n;
+                        }
+                        if let Some(error) = sort_error {
+                            restore_binding(&mut state.json_bindings, key_name, prior_key.clone());
+                            restore_binding(
+                                &mut state.json_bindings,
+                                value_name,
+                                prior_value.clone(),
+                            );
+                            return Err(error_at(
+                                ErrorKind::Render,
+                                error.message,
+                                text,
+                                i,
+                                source_path,
+                            ));
+                        }
+                        order.sort_by(|&a, &b| {
+                            let ordering = sort_key_compare(&sort_keys[a], &sort_keys[b]);
+                            if sort_descending {
+                                ordering.reverse()
+                            } else {
+                                ordering
+                            }
+                        });
+                    }
+
+                    let mut iteration_error: Option<RenderError> = None;
+                    for (position, &index) in order.iter().enumerate() {
+                        let (object_key, object_value) = object.get_index(index).unwrap();
                         state
                             .json_bindings
                             .insert(key_name.to_string(), Value::string(object_key.clone()));
@@ -540,31 +657,37 @@ fn parse(
                             "loop".to_string(),
                             make_loop_metadata(position, object.len()),
                         );
-                        let nested =
-                            parse(state, host, identity, page, &body, source_path, depth + 1)?;
-                        append_indented(
-                            &mut output,
-                            &nested,
-                            &control_indent,
-                            insertion_code_block_depth,
-                        );
-                        if body_multiline && position + 1 < object.len() {
-                            output.push('\n');
-                            output.push_str(&control_indent);
+                        match parse(state, host, identity, page, &body, source_path, depth + 1) {
+                            Ok(nested) => {
+                                append_indented(
+                                    &mut output,
+                                    &nested,
+                                    &control_indent,
+                                    insertion_code_block_depth,
+                                );
+                                if body_multiline && position + 1 < order.len() {
+                                    output.push('\n');
+                                    output.push_str(&control_indent);
+                                }
+                            }
+                            Err(error) => {
+                                iteration_error = Some(error);
+                                break;
+                            }
                         }
                     }
-                    match prior_key {
-                        Some(value) => state.json_bindings.insert(key_name.to_string(), value),
-                        None => state.json_bindings.shift_remove(key_name),
-                    };
-                    match prior_value {
-                        Some(value) => state.json_bindings.insert(value_name.to_string(), value),
-                        None => state.json_bindings.shift_remove(value_name),
-                    };
-                    match prior_loop {
-                        Some(value) => state.json_bindings.insert("loop".to_string(), value),
-                        None => state.json_bindings.shift_remove("loop"),
-                    };
+                    restore_binding(&mut state.json_bindings, key_name, prior_key);
+                    restore_binding(&mut state.json_bindings, value_name, prior_value);
+                    restore_binding(&mut state.json_bindings, "loop", prior_loop);
+                    if let Some(error) = iteration_error {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            error.message,
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
                     i = block_close + 1;
                     continue;
                 }
@@ -1486,6 +1609,14 @@ fn sort_key_compare(left: &Value, right: &Value) -> std::cmp::Ordering {
         (Value::String(a), Value::String(b)) => a.cmp(b),
         _ => std::cmp::Ordering::Equal,
     }
+}
+
+/// Restore a scoped binding to its prior value (or remove it).
+fn restore_binding(bindings: &mut crate::expr::JsonBindings, key: &str, prior: Option<Value>) {
+    match prior {
+        Some(value) => bindings.insert(key.to_string(), value),
+        None => bindings.shift_remove(key),
+    };
 }
 
 /// `@for` collection clause: `collection [by key asc|desc]`, with top-level
