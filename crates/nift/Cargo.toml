@@ -16,3 +16,7 @@ workspace = true
 # ordered document (member order = insertion/document order), which affects
 # template rendering when objects are iterated.
 indexmap = "2"
+# Time/platform-dependent built-in metadata (build-time/date/YYYY/YY/timezone).
+# Only these explicitly time-dependent built-ins use a clock; deterministic
+# metadata and rendering never depend on the current time.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
