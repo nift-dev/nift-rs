@@ -76,10 +76,34 @@ struct RenderState {
     /// Scoped value bindings from `@for` loops (and later `@json`), consulted
     /// after host bindings.
     json_bindings: crate::expr::JsonBindings,
+    /// Names bound by @json within the current control-block scope stack.
+    /// Pop of a scope erases those bindings (reference json_binding_scopes_).
+    json_binding_scopes: Vec<Vec<String>>,
     /// Dependency spellings discovered during rendering (root-relative).
     dependencies: std::collections::BTreeSet<String>,
     /// Requirement spellings discovered during rendering (root-relative).
     requirements: std::collections::BTreeSet<String>,
+}
+
+/// Parse a control-block body under a fresh @json-binding scope, erasing
+/// bindings created inside it when the scope exits (on success AND error).
+fn parse_with_scope(
+    state: &mut RenderState,
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    page: Option<&Source>,
+    body: &str,
+    source_path: &Path,
+    depth: usize,
+) -> Result<String, RenderError> {
+    state.json_binding_scopes.push(Vec::new());
+    let result = parse(state, host, identity, page, body, source_path, depth);
+    if let Some(names) = state.json_binding_scopes.pop() {
+        for name in names {
+            state.json_bindings.shift_remove(&name);
+        }
+    }
+    result
 }
 
 fn parse(
@@ -448,7 +472,15 @@ fn parse(
                             "loop".to_string(),
                             make_loop_metadata(position, array.len()),
                         );
-                        match parse(state, host, identity, page, &body, source_path, depth + 1) {
+                        match parse_with_scope(
+                            state,
+                            host,
+                            identity,
+                            page,
+                            &body,
+                            source_path,
+                            depth + 1,
+                        ) {
                             Ok(nested) => {
                                 append_indented(
                                     &mut output,
@@ -664,7 +696,15 @@ fn parse(
                             "loop".to_string(),
                             make_loop_metadata(position, object.len()),
                         );
-                        match parse(state, host, identity, page, &body, source_path, depth + 1) {
+                        match parse_with_scope(
+                            state,
+                            host,
+                            identity,
+                            page,
+                            &body,
+                            source_path,
+                            depth + 1,
+                        ) {
                             Ok(nested) => {
                                 append_indented(
                                     &mut output,
@@ -764,7 +804,8 @@ fn parse(
             let mut chain_end = block_close + 1;
             if condition_value {
                 let body = normalize_control_block_body(&text[block_open + 1..block_close]);
-                let nested = parse(state, host, identity, page, &body, source_path, depth + 1)?;
+                let nested =
+                    parse_with_scope(state, host, identity, page, &body, source_path, depth + 1)?;
                 append_indented(
                     &mut output,
                     &nested,
@@ -866,7 +907,15 @@ fn parse(
 
                 if !selected && branch_condition {
                     let body = normalize_control_block_body(&text[cursor + 1..else_block_close]);
-                    let nested = parse(state, host, identity, page, &body, source_path, depth + 1)?;
+                    let nested = parse_with_scope(
+                        state,
+                        host,
+                        identity,
+                        page,
+                        &body,
+                        source_path,
+                        depth + 1,
+                    )?;
                     append_indented(
                         &mut output,
                         &nested,
@@ -1306,8 +1355,9 @@ fn parse(
                     &input_source,
                     &normalized,
                     depth + 1,
-                )?;
+                );
                 state.input_stack.pop();
+                let nested = nested?;
                 append_indented(&mut output, &nested, "", insertion_code_block_depth);
                 i = end;
                 continue;
@@ -1384,7 +1434,10 @@ fn parse(
                     )
                 })?;
                 if parameters_count == 3 {
-                    let schema_path_argument = parameters[2].trim().to_string();
+                    let schema_path_argument =
+                        interpolate_parameter(state, host, identity, &parameters[2]).map_err(
+                            |e| error_at(ErrorKind::Render, e.message, text, i, source_path),
+                        )?;
                     let schema_path = lexically_normal(&host.root().join(&schema_path_argument));
                     if !path_within(host.root(), &schema_path) {
                         return Err(error_at(
@@ -1429,6 +1482,9 @@ fn parse(
                         ));
                     }
                     state.dependencies.insert(host.relative(&schema_path));
+                }
+                if let Some(scope) = state.json_binding_scopes.last_mut() {
+                    scope.push(binding_name.clone());
                 }
                 state.json_bindings.insert(binding_name, document);
                 state.dependencies.insert(host.relative(&json_path));
@@ -1680,7 +1736,7 @@ fn path_within(base: &Path, candidate: &Path) -> bool {
 /// Lexical path normalisation (resolve `.`/`..` without touching the
 /// filesystem), matching the reference's `lexically_normal` for the absolute
 /// paths used as render identities.
-fn lexically_normal(path: &Path) -> PathBuf {
+pub(crate) fn lexically_normal(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {

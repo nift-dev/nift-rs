@@ -335,15 +335,14 @@ fn validate_at(value: &Value, schema: &Value, path: &str) -> Result<(), String> 
         let Some(required_list) = required.as_array() else {
             return Err(format!("{path}: schema 'required' must be an array"));
         };
-        let Some(object) = value.as_object() else {
-            return Ok(());
-        };
-        for requirement in required_list {
-            let Some(key) = requirement.as_str() else {
-                return Err(format!("{path}: 'required' entries must be strings"));
-            };
-            if !object.contains_key(key) {
-                return Err(format!("{path}: missing required property '{key}'"));
+        if let Some(object) = value.as_object() {
+            for requirement in required_list {
+                let Some(key) = requirement.as_str() else {
+                    return Err(format!("{path}: 'required' entries must be strings"));
+                };
+                if !object.contains_key(key) {
+                    return Err(format!("{path}: missing required property '{key}'"));
+                }
             }
         }
     }
@@ -361,6 +360,54 @@ fn validate_at(value: &Value, schema: &Value, path: &str) -> Result<(), String> 
         }
     }
 
+    if let Some(additional) = schema_object.get("additionalProperties") {
+        if let Some(object) = value.as_object() {
+            if additional == &Value::boolean(false) {
+                if let Some(properties) = schema_object.get("properties") {
+                    if let Some(properties_object) = properties.as_object() {
+                        for key in object.keys() {
+                            if !properties_object.contains_key(key) {
+                                return Err(format!("{path}: unexpected property '{key}'"));
+                            }
+                        }
+                    }
+                }
+            } else if additional.is_object() {
+                let additional_value = additional.clone();
+                if let Some(properties) = schema_object.get("properties") {
+                    if let Some(properties_object) = properties.as_object() {
+                        for (key, property_value) in object {
+                            if !properties_object.contains_key(key) {
+                                validate_at(
+                                    property_value,
+                                    &additional_value,
+                                    &format!("{path}.{key}"),
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(count) = schema_object.get("minProperties") {
+        if let Some(object) = value.as_object() {
+            let limit = count.as_number().unwrap_or(0.0);
+            if object.len() < limit as usize {
+                return Err(format!("{path}: object has fewer than {limit} properties"));
+            }
+        }
+    }
+    if let Some(count) = schema_object.get("maxProperties") {
+        if let Some(object) = value.as_object() {
+            let limit = count.as_number().unwrap_or(0.0);
+            if object.len() > limit as usize {
+                return Err(format!("{path}: object has more than {limit} properties"));
+            }
+        }
+    }
+
     if let Some(items) = schema_object.get("items") {
         if let Some(array) = value.as_array() {
             if let Some(items_object) = items.as_object() {
@@ -371,18 +418,120 @@ fn validate_at(value: &Value, schema: &Value, path: &str) -> Result<(), String> 
             }
         }
     }
-
-    if schema_object.get("additionalProperties") == Some(&Value::boolean(false)) {
-        if let Some(object) = value.as_object() {
-            if let Some(properties) = schema_object.get("properties") {
-                if let Some(properties_object) = properties.as_object() {
-                    for key in object.keys() {
-                        if !properties_object.contains_key(key) {
-                            return Err(format!("{path}: unexpected property '{key}'"));
-                        }
-                    }
+    if let Some(count) = schema_object.get("minItems") {
+        if let Some(array) = value.as_array() {
+            let limit = count.as_number().unwrap_or(0.0);
+            if array.len() < limit as usize {
+                return Err(format!("{path}: array has fewer than {limit} items"));
+            }
+        }
+    }
+    if let Some(count) = schema_object.get("maxItems") {
+        if let Some(array) = value.as_array() {
+            let limit = count.as_number().unwrap_or(0.0);
+            if array.len() > limit as usize {
+                return Err(format!("{path}: array has more than {limit} items"));
+            }
+        }
+    }
+    if schema_object.get("uniqueItems") == Some(&Value::boolean(true)) {
+        if let Some(array) = value.as_array() {
+            let mut seen = std::collections::HashSet::new();
+            for item in array {
+                if !seen.insert(crate::expr::dump_compact(item)) {
+                    return Err(format!("{path}: array items must be unique"));
                 }
             }
+        }
+    }
+
+    if let Some(count) = schema_object.get("minLength") {
+        if let Some(string) = value.as_str() {
+            let limit = count.as_number().unwrap_or(0.0);
+            if string.chars().count() < limit as usize {
+                return Err(format!("{path}: string is shorter than {limit} characters"));
+            }
+        }
+    }
+    if let Some(count) = schema_object.get("maxLength") {
+        if let Some(string) = value.as_str() {
+            let limit = count.as_number().unwrap_or(0.0);
+            if string.chars().count() > limit as usize {
+                return Err(format!("{path}: string is longer than {limit} characters"));
+            }
+        }
+    }
+
+    for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+        if let Some(bound) = schema_object.get(key) {
+            if let Some(number) = value.as_number() {
+                let bound = bound.as_number().unwrap_or(f64::NAN);
+                let violation = match key {
+                    "minimum" => number < bound,
+                    "maximum" => number > bound,
+                    "exclusiveMinimum" => number <= bound,
+                    "exclusiveMaximum" => number >= bound,
+                    _ => false,
+                };
+                if violation {
+                    return Err(format!("{path}: {number} is not within {key} {bound}"));
+                }
+            }
+        }
+    }
+    if let Some(multiple) = schema_object.get("multipleOf") {
+        if let Some(number) = value.as_number() {
+            let multiple = multiple.as_number().unwrap_or(0.0);
+            if multiple != 0.0 {
+                let remainder = number / multiple;
+                if remainder.fract().abs() > 1e-9 {
+                    return Err(format!("{path}: {number} is not a multiple of {multiple}"));
+                }
+            }
+        }
+    }
+
+    if let Some(enum_list) = schema_object.get("enum") {
+        let Some(enum_array) = enum_list.as_array() else {
+            return Err(format!("{path}: schema 'enum' must be an array"));
+        };
+        if !enum_array.iter().any(|candidate| candidate == value) {
+            return Err(format!(
+                "{path}: value is not one of the allowed enum values"
+            ));
+        }
+    }
+    if let Some(const_value) = schema_object.get("const") {
+        if const_value != value {
+            return Err(format!("{path}: value does not equal the const value"));
+        }
+    }
+
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if let Some(combinators) = schema_object.get(key) {
+            let Some(combinator_array) = combinators.as_array() else {
+                return Err(format!("{path}: schema '{key}' must be an array"));
+            };
+            let mut matched = 0usize;
+            for sub_schema in combinator_array {
+                if validate_at(value, sub_schema, path).is_ok() {
+                    matched += 1;
+                }
+            }
+            let ok = match key {
+                "allOf" => matched == combinator_array.len(),
+                "anyOf" => matched >= 1,
+                "oneOf" => matched == 1,
+                _ => false,
+            };
+            if !ok {
+                return Err(format!("{path}: does not satisfy '{key}'"));
+            }
+        }
+    }
+    if let Some(not_schema) = schema_object.get("not") {
+        if validate_at(value, not_schema, path).is_ok() {
+            return Err(format!("{path}: value matches the 'not' schema"));
         }
     }
 

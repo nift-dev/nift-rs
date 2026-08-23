@@ -65,7 +65,30 @@ pub fn resolve_json_value(
         Some(value) => value.clone(),
         None => match bindings.get(root) {
             Some(value) => value.clone(),
-            None => return Ok(None),
+            None => {
+                // Contract resolution (NR4 host capability; project-backed
+                // sources arrive at NR8). Precedence: host binding > scoped
+                // binding > contract > metadata (checked by the caller).
+                if host.is_contract_name(root) {
+                    match host.contract_source(root) {
+                        Some(source) => {
+                            let path = crate::parser::lexically_normal(&host.root().join(source));
+                            host.read_json(&path).map_err(|e| {
+                                RenderError::new(
+                                    ErrorKind::Render,
+                                    format!(
+                                        "contract '{root}': failed to parse {source} ({})",
+                                        e.message
+                                    ),
+                                )
+                            })?
+                        }
+                        None => return Ok(None),
+                    }
+                } else {
+                    return Ok(None);
+                }
+            }
         },
     };
 

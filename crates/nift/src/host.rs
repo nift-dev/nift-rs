@@ -98,4 +98,18 @@ pub trait RenderHost {
     fn source_readable(&self, path: &Path) -> bool {
         self.read_source(path).is_ok()
     }
+
+    /// Whether `name` is a configured contract namespace (NR4 capability;
+    /// project-backed contract sources arrive at NR8). Standalone hosts expose
+    /// no contract namespaces by default.
+    fn is_contract_name(&self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// The project-relative JSON source for a contract namespace, if any.
+    fn contract_source(&self, name: &str) -> Option<&str> {
+        let _ = name;
+        None
+    }
 }
