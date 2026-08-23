@@ -1,0 +1,23 @@
+# Corpus mirror provenance
+
+This directory is a derived, hash-verified mirror of the authoritative Nift
+semantic corpus. This file records which exact frozen semantic corpus the
+mirror was synced from, for audit/pinning purposes. It is NOT part of the
+hashed assets (MANIFEST.sha256 covers `cases/` + `manifest.json`).
+
+authoritative repository: nift-embed (frozen C++ project-aware Embedded Nift reference)
+source conformance path:  tests/conformance
+frozen source HEAD:       ae99723  (PA6 final documentation reconciliation; C++ reference signed off)
+corpus content commit:    9ab4ad0  (last semantic change to tests/conformance; final 9/9 corpus)
+corpus snapshot:          9 cases = 3 parity (comprehensive, schema, getenv) + 6 reject
+                          (bad-config, bad-tracking, malformed-config,
+                          malformed-tracking, missing-source, path-escape)
+canonical assets mirrored: cases/ and manifest.json only (implementation
+                          adapters - run_conformance.py, gen_golden.py,
+                          cpp_runner.cpp - are NOT part of the canonical data)
+
+A later intentional semantic change updates the canonical corpus in the
+authoritative repository under review FIRST, then this mirror is re-synced and
+this provenance file is updated to the new source commit. Never edit the
+canonical data in this mirror directly; `bash corpus/sync_corpus.sh verify`
+guards against accidental forking.

@@ -24,3 +24,13 @@ jobs:
         run: |
           grep -q 'forbid(unsafe_code)' crates/nift/src/lib.rs || { echo 'missing #![forbid(unsafe_code)]' >&2; exit 1; }
           grep -q 'unsafe_code = "forbid"' Cargo.toml || { echo 'missing workspace forbid lint' >&2; exit 1; }
+
+  # The declared MSRV (rust-version = "1.97") must actually compile; stable is
+  # the main lint/test toolchain.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97
+      - name: Build all targets at MSRV
+        run: cargo check --workspace --all-targets

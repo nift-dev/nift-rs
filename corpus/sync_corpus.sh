@@ -31,8 +31,25 @@ MODE="${1:-sync}"
 # mirrored).
 CANONICAL_ASSETS="cases manifest.json"
 
+# Deterministic ordering: LC_ALL=C forces a byte-order, locale-independent
+# sort so the manifest line order is identical in every environment and under
+# every locale. (The default `sort` uses LC_COLLATE, which reorders paths
+# between locales and made verify fail falsely cross-locale.)
+#
+# Portable hash tool: sha256sum (GNU) with a shasum -a 256 fallback (macOS/BSD);
+# both emit "<hash>  <path>".
+HASH_TOOL="sha256sum"
+if ! command -v "$HASH_TOOL" >/dev/null 2>&1; then
+    if command -v shasum >/dev/null 2>&1; then
+        HASH_TOOL="shasum -a 256"
+    else
+        echo "error: no sha-256 tool available (need sha256sum or shasum)" >&2
+        exit 1
+    fi
+fi
+
 hash_tree() {
-    (cd "$HERE" && find $CANONICAL_ASSETS -type f | sort | xargs sha256sum)
+    (cd "$HERE" && find $CANONICAL_ASSETS -type f | LC_ALL=C sort | xargs $HASH_TOOL)
 }
 
 case "$MODE" in
