@@ -224,6 +224,362 @@ fn parse(
             }
         }
 
+        // @item / @paginate: NR3 parse semantics only. Pagination is a tracked
+        // page concern (NR8); outside it these are controlled errors.
+        if text[i..].starts_with("@item")
+            && (i + 5 == len
+                || matches!(text.as_bytes()[i + 5], b'{')
+                || text.as_bytes()[i + 5].is_ascii_whitespace())
+        {
+            return Err(error_at(
+                ErrorKind::Render,
+                "@item requires pagination on the tracked item",
+                text,
+                i,
+                source_path,
+            ));
+        }
+        if text[i..].starts_with("@paginate")
+            && (i + 9 == len
+                || !(text.as_bytes()[i + 9].is_ascii_alphanumeric()
+                    || text.as_bytes()[i + 9] == b'_'))
+        {
+            return Err(error_at(
+                ErrorKind::Render,
+                "@paginate requires pagination on the tracked item",
+                text,
+                i,
+                source_path,
+            ));
+        }
+
+        // @for(...){...} over arrays or objects.
+        if text[i..].starts_with("@for(") {
+            let header_close = find_balanced(text, i + 4, b'(', b')').ok_or_else(|| {
+                error_at(
+                    ErrorKind::Parse,
+                    "@for has no matching ')' for its header",
+                    text,
+                    i,
+                    source_path,
+                )
+            })?;
+            let mut block_open = header_close + 1;
+            while block_open < len && matches!(bytes[block_open], b' ' | b'\t' | b'\r' | b'\n') {
+                block_open += 1;
+            }
+            if block_open >= len || bytes[block_open] != b'{' {
+                return Err(error_at(
+                    ErrorKind::Parse,
+                    "@for(...) must be followed by a '{...}' block",
+                    text,
+                    i,
+                    source_path,
+                ));
+            }
+            let block_close = find_balanced(text, block_open, b'{', b'}').ok_or_else(|| {
+                error_at(
+                    ErrorKind::Parse,
+                    "@for block has no matching '}'",
+                    text,
+                    block_open,
+                    source_path,
+                )
+            })?;
+
+            let header = text[i + 5..header_close].trim();
+            let separator = crate::expr::find_top_level(header, ":");
+            let Some(separator) = separator else {
+                return Err(error_at(
+                    ErrorKind::Parse,
+                    "@for header must contain ':'",
+                    text,
+                    i,
+                    source_path,
+                ));
+            };
+            let binding_part = header[..separator].trim();
+            let collection_clause = header[separator + 1..].trim();
+            let (collection_expression, sort_expression, sort_descending) =
+                parse_for_collection_clause(collection_clause)?;
+
+            let collection_value = crate::expr::evaluate_collection_value(
+                &mut state.json_bindings,
+                host,
+                identity,
+                &collection_expression,
+            )
+            .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+
+            let body = normalize_control_block_body(&text[block_open + 1..block_close]);
+            let body_multiline = body.contains('\n');
+            let control_indent = insertion_indent(&output);
+            let insertion_code_block_depth = state.code_block_depth;
+
+            match &collection_value {
+                Value::Array(array) => {
+                    if !crate::bindings::valid_binding_identifier(binding_part) {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "array @for syntax is @for(item : array){...}",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    if crate::expr::reserved_binding_name(binding_part) {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            format!(
+                                "@for binding '{binding_part}' conflicts with built-in metadata"
+                            ),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    if !sort_expression.is_empty()
+                        && !(sort_expression == binding_part
+                            || sort_expression.starts_with(&format!("{binding_part}."))
+                            || sort_expression.starts_with(&format!("{binding_part}[")))
+                    {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            format!(
+                                "@for array sort key must begin with loop binding '{binding_part}'"
+                            ),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+
+                    let mut order: Vec<usize> = (0..array.len()).collect();
+                    if !sort_expression.is_empty() {
+                        let mut sort_keys: Vec<Value> = Vec::new();
+                        let mut key_type: Option<std::mem::Discriminant<Value>> = None;
+                        for element in array {
+                            let prior = state.json_bindings.get(binding_part).cloned();
+                            state
+                                .json_bindings
+                                .insert(binding_part.to_string(), element.clone());
+                            let key_result = crate::expr::resolve_json_value(
+                                &state.json_bindings,
+                                host,
+                                &sort_expression,
+                            );
+                            match prior {
+                                Some(prior) => {
+                                    state.json_bindings.insert(binding_part.to_string(), prior)
+                                }
+                                None => state.json_bindings.shift_remove(binding_part),
+                            };
+                            let key = match key_result {
+                                Ok(Some(key)) => key,
+                                _ => {
+                                    return Err(error_at(
+                                        ErrorKind::Render,
+                                        "@for sort key is not a bound JSON path",
+                                        text,
+                                        i,
+                                        source_path,
+                                    ));
+                                }
+                            };
+                            if !key.is_number() && !key.is_string() {
+                                return Err(error_at(
+                                    ErrorKind::Render,
+                                    "@for sort keys must all be numbers or all be strings",
+                                    text,
+                                    i,
+                                    source_path,
+                                ));
+                            }
+                            match key_type {
+                                None => key_type = Some(std::mem::discriminant(&key)),
+                                Some(t) if t != std::mem::discriminant(&key) => {
+                                    return Err(error_at(
+                                        ErrorKind::Render,
+                                        "@for sort keys must have the same type",
+                                        text,
+                                        i,
+                                        source_path,
+                                    ));
+                                }
+                                Some(_) => {}
+                            }
+                            sort_keys.push(key);
+                        }
+                        order.sort_by(|&a, &b| {
+                            let ordering = sort_key_compare(&sort_keys[a], &sort_keys[b]);
+                            if sort_descending {
+                                ordering.reverse()
+                            } else {
+                                ordering
+                            }
+                        });
+                    }
+
+                    let prior_element = state.json_bindings.get(binding_part).cloned();
+                    let prior_loop = state.json_bindings.get("loop").cloned();
+                    for (position, &index) in order.iter().enumerate() {
+                        let element = &array[index];
+                        state
+                            .json_bindings
+                            .insert(binding_part.to_string(), element.clone());
+                        state.json_bindings.insert(
+                            "loop".to_string(),
+                            make_loop_metadata(position, array.len()),
+                        );
+                        let nested =
+                            parse(state, host, identity, page, &body, source_path, depth + 1)?;
+                        append_indented(
+                            &mut output,
+                            &nested,
+                            &control_indent,
+                            insertion_code_block_depth,
+                        );
+                        if body_multiline && position + 1 < order.len() {
+                            output.push('\n');
+                            output.push_str(&control_indent);
+                        }
+                    }
+                    match prior_element {
+                        Some(value) => state.json_bindings.insert(binding_part.to_string(), value),
+                        None => state.json_bindings.shift_remove(binding_part),
+                    };
+                    match prior_loop {
+                        Some(value) => state.json_bindings.insert("loop".to_string(), value),
+                        None => state.json_bindings.shift_remove("loop"),
+                    };
+                    i = block_close + 1;
+                    continue;
+                }
+                Value::Object(object) => {
+                    if binding_part.len() < 5
+                        || !binding_part.starts_with('(')
+                        || !binding_part.ends_with(')')
+                    {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "object @for syntax is @for((key, val) : object){...}",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    let pair = &binding_part[1..binding_part.len() - 1];
+                    let Some(comma) = pair.find(',') else {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "object @for requires exactly two bindings: (key, val)",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    };
+                    if pair[comma + 1..].contains(',') {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "object @for requires exactly two bindings: (key, val)",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    let key_name = pair[..comma].trim();
+                    let value_name = pair[comma + 1..].trim();
+                    if !crate::bindings::valid_binding_identifier(key_name)
+                        || !crate::bindings::valid_binding_identifier(value_name)
+                        || key_name == value_name
+                    {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "object @for key and value bindings must be distinct identifiers",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    if crate::expr::reserved_binding_name(key_name)
+                        || crate::expr::reserved_binding_name(value_name)
+                    {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "@for bindings cannot conflict with built-in metadata",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    let valid_object_sort_root = sort_expression.is_empty()
+                        || sort_expression == key_name
+                        || sort_expression == value_name
+                        || sort_expression.starts_with(&format!("{key_name}."))
+                        || sort_expression.starts_with(&format!("{key_name}["));
+                    if !valid_object_sort_root {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "@for object sort key must be the key or value binding",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    let prior_key = state.json_bindings.get(key_name).cloned();
+                    let prior_value = state.json_bindings.get(value_name).cloned();
+                    let prior_loop = state.json_bindings.get("loop").cloned();
+                    for (position, (object_key, object_value)) in object.iter().enumerate() {
+                        state
+                            .json_bindings
+                            .insert(key_name.to_string(), Value::string(object_key.clone()));
+                        state
+                            .json_bindings
+                            .insert(value_name.to_string(), object_value.clone());
+                        state.json_bindings.insert(
+                            "loop".to_string(),
+                            make_loop_metadata(position, object.len()),
+                        );
+                        let nested =
+                            parse(state, host, identity, page, &body, source_path, depth + 1)?;
+                        append_indented(
+                            &mut output,
+                            &nested,
+                            &control_indent,
+                            insertion_code_block_depth,
+                        );
+                        if body_multiline && position + 1 < object.len() {
+                            output.push('\n');
+                            output.push_str(&control_indent);
+                        }
+                    }
+                    match prior_key {
+                        Some(value) => state.json_bindings.insert(key_name.to_string(), value),
+                        None => state.json_bindings.shift_remove(key_name),
+                    };
+                    match prior_value {
+                        Some(value) => state.json_bindings.insert(value_name.to_string(), value),
+                        None => state.json_bindings.shift_remove(value_name),
+                    };
+                    match prior_loop {
+                        Some(value) => state.json_bindings.insert("loop".to_string(), value),
+                        None => state.json_bindings.shift_remove("loop"),
+                    };
+                    i = block_close + 1;
+                    continue;
+                }
+                _ => {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        "@for can only iterate over JSON arrays or objects",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+            }
+        }
+
         // @if(...){...} with @else / @else @if chains.
         if text[i..].starts_with("@if(") {
             let condition_close = find_balanced(text, i + 3, b'(', b')').ok_or_else(|| {
@@ -427,6 +783,7 @@ fn parse(
             }
             let function = &text[i + 1..name_end];
             let mut has_parameters = false;
+            let mut parameters: Vec<String> = Vec::new();
             let mut end = name_end;
             if name_end < len && bytes[name_end] == b'(' {
                 let close = find_balanced(text, name_end, b'(', b')').ok_or_else(|| {
@@ -439,8 +796,10 @@ fn parse(
                     )
                 })?;
                 has_parameters = true;
+                parameters = crate::expr::parse_parameters(&text[name_end + 1..close]);
                 end = close + 1;
             }
+            let parameters_count = parameters.len();
 
             // Parameterised functions are only calls when followed by (...);
             // bare non-content @words stay literal (keeps prose like
@@ -523,6 +882,163 @@ fn parse(
                 i = end;
                 continue;
             }
+
+            // Collection operators: render the result as compact JSON.
+            if matches!(
+                function,
+                "filter"
+                    | "map"
+                    | "sort"
+                    | "slice"
+                    | "find"
+                    | "some"
+                    | "every"
+                    | "distinct"
+                    | "reverse"
+                    | "sum"
+                    | "prod"
+                    | "min"
+                    | "max"
+                    | "reduce"
+            ) {
+                if !has_parameters {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        format!("{function}: expected parameters"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let call_end = if end > name_end && text.as_bytes()[end - 1] == b';' {
+                    end - 1
+                } else {
+                    end
+                };
+                let call = format!("@{function}{}", &text[name_end..call_end]);
+                let result = crate::expr::evaluate_collection_value(
+                    &mut state.json_bindings,
+                    host,
+                    identity,
+                    &call,
+                )
+                .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                output += &crate::expr::dump_compact(&result);
+                i = end;
+                continue;
+            }
+
+            if function == "substr" {
+                if !has_parameters || parameters_count != 3 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "substr: expected value, position and length",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let value = interpolate_parameter(state, host, identity, &parameters[0])
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                let parse_index = |raw: &str, label: &str| -> Result<usize, RenderError> {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('-') {
+                        return Err(RenderError::new(
+                            ErrorKind::Render,
+                            format!("substr: {label} must be a non-negative integer"),
+                        ));
+                    }
+                    trimmed.parse::<usize>().map_err(|_| {
+                        RenderError::new(
+                            ErrorKind::Render,
+                            format!("substr: {label} must be a non-negative integer"),
+                        )
+                    })
+                };
+                let position = parse_index(&parameters[1], "position")
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                let length = parse_index(&parameters[2], "length")
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                let chars: Vec<char> = value.chars().collect();
+                if position < chars.len() && length > 0 {
+                    let finish = (position + length.min(chars.len() - position)).min(chars.len());
+                    output.extend(chars[position..finish].iter());
+                }
+                i = end;
+                continue;
+            }
+
+            if function == "join" {
+                if !has_parameters || parameters_count != 2 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "join: expected array and separator",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let mut expression = parameters[0].trim().to_string();
+                if expression.len() >= 3
+                    && expression.starts_with("$[")
+                    && expression.ends_with(']')
+                {
+                    expression = expression[2..expression.len() - 1].to_string();
+                }
+                let array_value = crate::expr::evaluate_collection_value(
+                    &mut state.json_bindings,
+                    host,
+                    identity,
+                    &expression,
+                )
+                .map_err(|e| {
+                    error_at(
+                        ErrorKind::Render,
+                        format!("join: {}", e.message),
+                        text,
+                        i,
+                        source_path,
+                    )
+                })?;
+                let Value::Array(array) = &array_value else {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        "join: first parameter must resolve to a JSON array",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                };
+                let separator = interpolate_parameter(state, host, identity, &parameters[1])
+                    .map_err(|e| {
+                        error_at(
+                            ErrorKind::Render,
+                            format!("join: {}", e.message),
+                            text,
+                            i,
+                            source_path,
+                        )
+                    })?;
+                for (item_index, item) in array.iter().enumerate() {
+                    if item.is_array() || item.is_object() {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            "join: array items must be scalar JSON values",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    if item_index > 0 {
+                        output += &separator;
+                    }
+                    output += &render_expression_value(item);
+                }
+                i = end;
+                continue;
+            }
+
+            // Unknown function (or a not-yet-implemented one): literal.
 
             // Unknown function (or a not-yet-implemented one): literal.
         }
@@ -959,4 +1475,140 @@ fn error_at(
 ) -> RenderError {
     let (line, column) = line_column(text, offset);
     RenderError::new(kind, message).at(path.to_string_lossy(), line, column)
+}
+
+/// Order two `@for` sort keys (numbers or strings).
+fn sort_key_compare(left: &Value, right: &Value) -> std::cmp::Ordering {
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) => {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// `@for` collection clause: `collection [by key asc|desc]`, with top-level
+/// `by` detection (reference `parse_for_collection_clause`).
+fn parse_for_collection_clause(clause: &str) -> Result<(String, String, bool), RenderError> {
+    let mut quoted = false;
+    let mut quote = 0u8;
+    let mut parens = 0;
+    let mut brackets = 0;
+    let bytes = clause.as_bytes();
+    let mut i = 0;
+    while i + 4 <= clause.len() {
+        let c = bytes[i];
+        if quoted {
+            if c == b'\\' && i + 1 < clause.len() {
+                i += 1;
+            } else if c == quote {
+                quoted = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            quoted = true;
+            quote = c;
+            i += 1;
+            continue;
+        }
+        match c {
+            b'(' => parens += 1,
+            b')' => {
+                if parens > 0 {
+                    parens -= 1;
+                }
+            }
+            b'[' => brackets += 1,
+            b']' if brackets > 0 => brackets -= 1,
+            _ => {}
+        }
+        if parens == 0 && brackets == 0 && clause[i..].starts_with(" by ") {
+            let collection = clause[..i].trim().to_string();
+            let tail = &clause[i + 4..];
+            let space = tail.rfind([' ', '\t']);
+            let Some(space) = space else {
+                return Err(RenderError::new(
+                    ErrorKind::Render,
+                    "@for sorting syntax is @for(item : collection by item.field asc|desc){...}",
+                ));
+            };
+            let sort_expression = tail[..space].trim().to_string();
+            let direction = tail[space + 1..].trim();
+            if direction != "asc" && direction != "desc" {
+                return Err(RenderError::new(
+                    ErrorKind::Render,
+                    "@for sorting syntax is @for(item : collection by item.field asc|desc){...}",
+                ));
+            }
+            return Ok((collection, sort_expression, direction == "desc"));
+        }
+        i += 1;
+    }
+    Ok((clause.trim().to_string(), String::new(), false))
+}
+
+/// The `loop` metadata object injected by `@for`.
+fn make_loop_metadata(index: usize, length: usize) -> Value {
+    let mut loop_value = Value::object();
+    let _ = loop_value.insert("index", Value::number((index + 1) as f64));
+    let _ = loop_value.insert("index0", Value::number(index as f64));
+    let _ = loop_value.insert("first", Value::boolean(index == 0));
+    let _ = loop_value.insert("last", Value::boolean(index + 1 == length));
+    let _ = loop_value.insert("length", Value::number(length as f64));
+    loop_value
+}
+
+/// Interpolate `$[...]` expressions inside a parameter string
+/// (reference `interpolate_parameter`).
+fn interpolate_parameter(
+    state: &RenderState,
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    text: &str,
+) -> Result<String, RenderError> {
+    let mut output = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("$[") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match crate::expr::scan_balanced_bracket(after) {
+            Some(end_rel) => {
+                let key = &after[..end_rel];
+                match crate::expr::evaluate_expression(&state.json_bindings, host, identity, key) {
+                    Ok(value) => match value {
+                        Value::Array(_) | Value::Object(_) => {
+                            return Err(RenderError::new(
+                                ErrorKind::Render,
+                                "cannot interpolate JSON collection into a string".to_string(),
+                            ));
+                        }
+                        _ => output.push_str(&render_expression_value(&value)),
+                    },
+                    Err(error) => {
+                        if error
+                            .message
+                            .starts_with("unknown value or malformed expression:")
+                        {
+                            output.push_str(&rest[..start]);
+                            output.push_str("$[");
+                            rest = after;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+                rest = &after[end_rel + 1..];
+            }
+            None => {
+                output.push_str(&rest[..start]);
+                output.push_str("$[");
+                rest = after;
+            }
+        }
+    }
+    output.push_str(rest);
+    Ok(output)
 }

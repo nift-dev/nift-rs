@@ -541,23 +541,36 @@ pub fn scalar_literal(text: &str) -> Option<Value> {
     text.parse::<f64>().ok().map(Value::number)
 }
 
-/// Split a parameter list on top-level commas (respecting nesting/quotes).
+/// Split a parameter list on top-level commas, matching the reference
+/// `parse_parameters`: quoted strings are unquoted and unescaped, whitespace is
+/// collapsed (trailing whitespace trimmed), nesting is respected.
 pub fn parse_parameters(text: &str) -> Vec<String> {
-    let mut params = Vec::new();
-    let mut start = 0;
-    let mut depth = 0;
+    let mut result: Vec<String> = Vec::new();
+    let mut current = String::new();
     let mut quoted = false;
     let mut quote = 0u8;
+    let mut parens = 0;
+    let mut brackets = 0;
+    let mut braces = 0;
+    let mut significant_end = 0usize;
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < text.len() {
         let c = bytes[i];
         if quoted {
             if c == b'\\' && i + 1 < text.len() {
-                // Skip the escaped character (unified quote/escape rule).
                 i += 1;
+                let escaped = bytes[i];
+                if escaped == b'$' {
+                    current.push('\\');
+                }
+                current.push(escaped as char);
+                significant_end = current.len();
             } else if c == quote {
                 quoted = false;
+            } else {
+                current.push(c as char);
+                significant_end = current.len();
             }
             i += 1;
             continue;
@@ -569,22 +582,42 @@ pub fn parse_parameters(text: &str) -> Vec<String> {
             continue;
         }
         match c {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            b',' if depth == 0 => {
-                params.push(text[start..i].trim().to_string());
-                start = i + 1;
-            }
+            b'(' => parens += 1,
+            b')' => parens -= 1,
+            b'[' => brackets += 1,
+            b']' => brackets -= 1,
+            b'{' => braces += 1,
+            b'}' => braces -= 1,
             _ => {}
+        }
+        if parens < 0 || brackets < 0 || braces < 0 {
+            return Vec::new();
+        }
+        if c == b',' && parens == 0 && brackets == 0 && braces == 0 {
+            current.truncate(significant_end);
+            result.push(std::mem::take(&mut current));
+            significant_end = 0;
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_whitespace() {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+        } else {
+            current.push(c as char);
+            significant_end = current.len();
         }
         i += 1;
     }
-    params.push(text[start..].trim().to_string());
-    params
+    if quoted || parens != 0 || brackets != 0 || braces != 0 {
+        return Vec::new();
+    }
+    if !text.is_empty() || !current.is_empty() {
+        current.truncate(significant_end);
+        result.push(current);
+    }
+    result
 }
 
 /// Top-level position of `needle`, or `None`.
@@ -1277,4 +1310,43 @@ fn write_escaped(out: &mut String, value: &str) {
             c => out.push(c),
         }
     }
+}
+
+/// Scan from the start of `text` (which begins immediately after `$[`) for the
+/// matching `]`, honouring nested brackets and quoted strings. Returns the
+/// relative position of the closing `]`.
+pub fn scan_balanced_bracket(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut nested = 0usize;
+    let mut quoted = false;
+    let mut quote = 0u8;
+    let mut i = 0;
+    while i < text.len() {
+        let c = bytes[i];
+        if quoted {
+            if c == b'\\' && i + 1 < text.len() {
+                i += 1;
+            } else if c == quote {
+                quoted = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            quoted = true;
+            quote = c;
+            i += 1;
+            continue;
+        }
+        if c == b'[' {
+            nested += 1;
+        } else if c == b']' {
+            if nested == 0 {
+                return Some(i);
+            }
+            nested -= 1;
+        }
+        i += 1;
+    }
+    None
 }
