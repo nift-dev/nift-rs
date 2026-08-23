@@ -60,7 +60,10 @@ pub fn render(
             "templated tracked items must execute exactly one @content; add @content through the template/input graph or omit the tracked template field",
         ));
     }
-    Ok(RenderResult::new(output))
+    let mut result = RenderResult::new(output);
+    result.dependencies = state.dependencies;
+    result.requirements = state.requirements;
+    Ok(result)
 }
 
 /// Per-render mutable state that persists across recursive parses.
@@ -73,6 +76,10 @@ struct RenderState {
     /// Scoped value bindings from `@for` loops (and later `@json`), consulted
     /// after host bindings.
     json_bindings: crate::expr::JsonBindings,
+    /// Dependency spellings discovered during rendering (root-relative).
+    dependencies: std::collections::BTreeSet<String>,
+    /// Requirement spellings discovered during rendering (root-relative).
+    requirements: std::collections::BTreeSet<String>,
 }
 
 fn parse(
@@ -1161,6 +1168,314 @@ fn parse(
                 continue;
             }
 
+            if function == "ent" {
+                if !has_parameters || parameters_count != 1 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "@ent expects exactly one entity",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let resolved = interpolate_parameter(state, host, identity, &parameters[0])
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                match crate::json::entity(&resolved) {
+                    Some(encoded) => output += encoded,
+                    None => {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!("do not currently have an entity value for '{resolved}'"),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                }
+                i = end;
+                continue;
+            }
+
+            if function == "getenv" {
+                if !has_parameters || parameters_count != 1 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "getenv: expected 1 parameter",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let resolved = interpolate_parameter(state, host, identity, &parameters[0])
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                if let Some(value) = host.environment(&resolved) {
+                    output += &value;
+                }
+                i = end;
+                continue;
+            }
+
+            if function == "input" {
+                if !has_parameters || parameters_count != 1 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "input: expected 1 parameter",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let resolved = interpolate_parameter(state, host, identity, &parameters[0])
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                let mut input_path = PathBuf::from(&resolved);
+                if input_path.is_relative() {
+                    let parent = source_path.parent().filter(|p| !p.as_os_str().is_empty());
+                    if let Some(parent) = parent {
+                        let relative_to_source = parent.join(&input_path);
+                        if host.source_exists(&relative_to_source) {
+                            input_path = relative_to_source;
+                        } else if host.root().as_os_str().is_empty() {
+                            return Err(error_at(
+                                ErrorKind::Render,
+                                format!(
+                                    "@input cannot resolve relative path '{resolved}' without a project root"
+                                ),
+                                text,
+                                i,
+                                source_path,
+                            ));
+                        } else {
+                            input_path = host.root().join(&input_path);
+                        }
+                    } else if host.root().as_os_str().is_empty() {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!(
+                                "@input cannot resolve relative path '{resolved}' without a project root"
+                            ),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    } else {
+                        input_path = host.root().join(&input_path);
+                    }
+                }
+                if !host.source_exists(&input_path) {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        format!("@input path does not exist: {resolved}"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let normalized = lexically_normal(
+                    &std::path::absolute(&input_path).unwrap_or(input_path.clone()),
+                );
+                let normalized_string = normalized.to_string_lossy().to_string();
+                if state.input_stack.contains(&normalized_string) {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        format!("@input would result in an input loop through {normalized_string}"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                if !host.source_readable(&normalized) {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        "input file is not readable",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                state.input_stack.push(normalized_string.clone());
+                state.dependencies.insert(host.relative(&normalized));
+                let insertion_code_block_depth = state.code_block_depth;
+                let input_source = host
+                    .read_source(&normalized)
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                let nested = parse(
+                    state,
+                    host,
+                    identity,
+                    page,
+                    &input_source,
+                    &normalized,
+                    depth + 1,
+                )?;
+                state.input_stack.pop();
+                append_indented(&mut output, &nested, "", insertion_code_block_depth);
+                i = end;
+                continue;
+            }
+
+            if function == "json" {
+                if !has_parameters || (parameters_count != 2 && parameters_count != 3) {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "json: expected 2 or 3 parameters (path, name[, schema])",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let resolved_path = interpolate_parameter(state, host, identity, &parameters[0])
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                let binding_name = parameters[1].trim().to_string();
+                if !crate::bindings::valid_binding_identifier(&binding_name) {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "json: name must be an identifier using letters, digits and underscores",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                if crate::expr::reserved_binding_name(&binding_name) {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        format!("json: name '{binding_name}' conflicts with built-in metadata/reserved bindings"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                if host.binding(&binding_name).is_some()
+                    || state.json_bindings.contains_key(&binding_name)
+                {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        format!("json: name '{binding_name}' is already bound"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let json_path = lexically_normal(&host.root().join(&resolved_path));
+                if !path_within(host.root(), &json_path) {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        format!("json: path must stay inside the Nift project: {resolved_path}"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                if !host.source_exists(&json_path) {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        format!("json: file does not exist: {resolved_path}"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let document = host.read_json(&json_path).map_err(|e| {
+                    error_at(
+                        ErrorKind::Render,
+                        format!("json: failed to parse {resolved_path} ({})", e.message),
+                        text,
+                        i,
+                        source_path,
+                    )
+                })?;
+                if parameters_count == 3 {
+                    let schema_path_argument = parameters[2].trim().to_string();
+                    let schema_path = lexically_normal(&host.root().join(&schema_path_argument));
+                    if !path_within(host.root(), &schema_path) {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!("json: schema path must stay inside the Nift project: {schema_path_argument}"),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    if !host.source_exists(&schema_path) {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!("json: schema file does not exist: {schema_path_argument}"),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    let schema = host.read_json(&schema_path).map_err(|e| {
+                        error_at(
+                            ErrorKind::Render,
+                            format!(
+                                "json: failed to parse schema {schema_path_argument} ({})",
+                                e.message
+                            ),
+                            text,
+                            i,
+                            source_path,
+                        )
+                    })?;
+                    if let Err(validation_error) = crate::json::validate_schema(&document, &schema)
+                    {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!(
+                                "json: {resolved_path} does not satisfy schema {schema_path_argument} ({validation_error})"
+                            ),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    state.dependencies.insert(host.relative(&schema_path));
+                }
+                state.json_bindings.insert(binding_name, document);
+                state.dependencies.insert(host.relative(&json_path));
+                i = end;
+                continue;
+            }
+
+            if function == "dep" {
+                if !has_parameters || parameters.is_empty() {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "dep: expected parameters",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                for dependency in &parameters {
+                    let resolved = interpolate_parameter(state, host, identity, dependency)
+                        .map_err(|e| {
+                            error_at(ErrorKind::Render, e.message, text, i, source_path)
+                        })?;
+                    let dependency_path = lexically_normal(&host.root().join(&resolved));
+                    if !path_within(host.root(), &dependency_path) {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!("dep: path must stay inside the Nift project: {resolved}"),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    if !host.source_exists(&dependency_path) {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!("failed as dependency does not exist: {resolved}"),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    state.dependencies.insert(host.relative(&dependency_path));
+                }
+                i = end;
+                continue;
+            }
+
             // Unknown function (or a not-yet-implemented one): literal.
 
             // Unknown function (or a not-yet-implemented one): literal.
@@ -1331,6 +1646,35 @@ fn resolve_source(
             Ok((text, identity))
         }
     }
+}
+
+/// Lexical relative path of `path` against `base` (mirroring the reference's
+/// `lexically_relative`), used by containment checks.
+fn lexically_relative(path: &Path, base: &Path) -> PathBuf {
+    let path_components: Vec<Component> = path.components().collect();
+    let base_components: Vec<Component> = base.components().collect();
+    let common = path_components
+        .iter()
+        .zip(&base_components)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut result = PathBuf::new();
+    for _ in common..base_components.len() {
+        result.push("..");
+    }
+    for component in &path_components[common..] {
+        result.push(component.as_os_str());
+    }
+    result
+}
+
+/// Whether `candidate` stays lexically inside `base` (reference
+/// `path_within`): the candidate's relative path must not escape via `..`.
+fn path_within(base: &Path, candidate: &Path) -> bool {
+    let base_norm = lexically_normal(base);
+    let cand_norm = lexically_normal(candidate);
+    let rel = lexically_relative(&cand_norm, &base_norm);
+    rel.components().next() != Some(Component::ParentDir)
 }
 
 /// Lexical path normalisation (resolve `.`/`..` without touching the

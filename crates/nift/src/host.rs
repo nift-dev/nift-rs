@@ -8,7 +8,7 @@
 //! snapshot) and with custom application hosts. No parser path assumes a
 //! filesystem.
 
-use crate::error::RenderError;
+use crate::error::{ErrorKind, RenderError};
 use crate::value::Value;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -73,4 +73,29 @@ pub trait RenderHost {
     /// Read a source file. The parser routes ALL source reads through this
     /// seam; a host that cannot read the path returns a `MissingSource` error.
     fn read_source(&self, path: &Path) -> Result<Cow<'_, str>, RenderError>;
+
+    /// Read and parse a JSON file. The default parses [`Self::read_source`];
+    /// a host with structured sources (e.g. in-memory JSON) may override.
+    fn read_json(&self, path: &Path) -> Result<Value, RenderError> {
+        let source = self.read_source(path)?;
+        crate::json::parse_json(&source).map_err(|error| {
+            RenderError::new(ErrorKind::Render, format!("failed to parse JSON ({error})"))
+        })
+    }
+
+    /// Environment lookup for `@getenv` (nullopt means unset). The default
+    /// reads the process environment.
+    fn environment(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    /// Source existence as seen by this host.
+    fn source_exists(&self, path: &Path) -> bool {
+        self.read_source(path).is_ok()
+    }
+
+    /// Source readability as seen by this host.
+    fn source_readable(&self, path: &Path) -> bool {
+        self.read_source(path).is_ok()
+    }
 }

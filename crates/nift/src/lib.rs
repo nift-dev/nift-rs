@@ -37,8 +37,9 @@ pub use bindings::{resolve, structural_builtin_name, valid_binding_identifier, B
 pub use context::Context;
 pub use error::{BindingError, ErrorKind, RenderError};
 pub use host::{RenderHost, RenderIdentity};
-pub use hosts::InMemoryHost;
+pub use hosts::{FilesystemHost, InMemoryHost};
 pub use parser::render;
 pub use result::RenderResult;
 pub use source::Source;
 pub use value::{Value, ValueError};
+pub mod json;
