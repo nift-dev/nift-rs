@@ -25,6 +25,7 @@
 pub mod bindings;
 pub mod context;
 pub mod error;
+pub mod expr;
 pub mod host;
 pub mod hosts;
 pub mod parser;

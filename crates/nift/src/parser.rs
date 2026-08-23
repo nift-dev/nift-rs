@@ -70,6 +70,9 @@ struct RenderState {
     html_comment_depth: usize,
     code_block_depth: usize,
     input_stack: Vec<String>,
+    /// Scoped value bindings from `@for` loops (and later `@json`), consulted
+    /// after host bindings.
+    json_bindings: crate::expr::JsonBindings,
 }
 
 fn parse(
@@ -175,35 +178,47 @@ fn parse(
         if text[i..].starts_with("$[") {
             if let Some(end) = scan_brackets(text, i + 2) {
                 let key = &text[i + 2..end];
-                match resolve_value(host, identity, key) {
-                    Ok(Resolved::Rendered(value)) => {
-                        output += &value;
-                        i = end + 1;
-                        continue;
-                    }
-                    Ok(Resolved::ArrayObject(kind)) => {
-                        let kind = if kind { "array" } else { "object" };
-                        return Err(error_at(
-                            ErrorKind::Render,
-                            format!("cannot render JSON {kind} $[{key}]; select an element first"),
-                            text,
-                            i,
-                            source_path,
-                        ));
-                    }
-                    Ok(Resolved::Unknown) => {
-                        // Unresolvable values fall through to literal emission,
-                        // matching the reference.
+                match crate::expr::evaluate_expression(&state.json_bindings, host, identity, key) {
+                    Ok(value) => {
+                        match value {
+                            Value::Array(_) | Value::Object(_) => {
+                                let kind = if matches!(value, Value::Array(_)) {
+                                    "array"
+                                } else {
+                                    "object"
+                                };
+                                return Err(error_at(
+                                ErrorKind::Render,
+                                format!("cannot render JSON {kind} $[{key}]; select an element first"),
+                                text,
+                                i,
+                                source_path,
+                            ));
+                            }
+                            _ => {
+                                output += &render_expression_value(&value);
+                                i = end + 1;
+                                continue;
+                            }
+                        }
                     }
                     Err(error) => {
-                        let mut error = error;
-                        if error.source.is_none() {
-                            let (line, column) = line_column(text, i);
-                            error.source = Some(source_path.to_string_lossy().to_string());
-                            error.line = Some(line);
-                            error.column = Some(column);
+                        if error
+                            .message
+                            .starts_with("unknown value or malformed expression:")
+                        {
+                            // Unresolvable values fall through to literal
+                            // emission, matching the reference.
+                        } else {
+                            let mut error = error;
+                            if error.source.is_none() {
+                                let (line, column) = line_column(text, i);
+                                error.source = Some(source_path.to_string_lossy().to_string());
+                                error.line = Some(line);
+                                error.column = Some(column);
+                            }
+                            return Err(error);
                         }
-                        return Err(error);
                     }
                 }
             }
@@ -243,14 +258,20 @@ fn parse(
                 )
             })?;
 
-            let condition_value = evaluate_condition(host, identity, &text[i + 4..condition_close])
-                .map_err(|e| {
-                    if e.source.is_none() {
-                        error_at(ErrorKind::Parse, e.message, text, i, source_path)
-                    } else {
-                        e
-                    }
-                })?;
+            let condition_value = crate::expr::evaluate_expression(
+                &state.json_bindings,
+                host,
+                identity,
+                &text[i + 4..condition_close],
+            )
+            .map(|value| truthy(&value))
+            .map_err(|e| {
+                if e.source.is_none() {
+                    error_at(ErrorKind::Parse, e.message, text, i, source_path)
+                } else {
+                    e
+                }
+            })?;
             let control_indent = insertion_indent(&output);
             let insertion_code_block_depth = state.code_block_depth;
             let mut selected = false;
@@ -316,11 +337,13 @@ fn parse(
                             )
                         })?;
                     if !selected {
-                        branch_condition = evaluate_condition(
+                        branch_condition = crate::expr::evaluate_expression(
+                            &state.json_bindings,
                             host,
                             identity,
                             &text[cursor + 1..else_condition_close],
                         )
+                        .map(|value| truthy(&value))
                         .map_err(|e| {
                             if e.source.is_none() {
                                 error_at(ErrorKind::Parse, e.message, text, cursor, source_path)
@@ -511,127 +534,6 @@ fn parse(
     Ok(output)
 }
 
-enum Resolved {
-    /// Rendered scalar text.
-    Rendered(String),
-    /// Resolved to an array (true) or object (false) rendered directly.
-    ArrayObject(bool),
-    /// Nothing resolved; emit the `$[...]` literally.
-    Unknown,
-}
-
-enum Lookup<'h> {
-    Found(&'h Value),
-    Unknown,
-}
-
-fn resolve_value(
-    host: &dyn RenderHost,
-    identity: &RenderIdentity,
-    raw_key: &str,
-) -> Result<Resolved, RenderError> {
-    let key = raw_key.trim();
-    if key.is_empty() {
-        return Ok(Resolved::Unknown);
-    }
-    match lookup(host, key)? {
-        Lookup::Found(value) => Ok(match value {
-            Value::Array(_) => Resolved::ArrayObject(true),
-            Value::Object(_) => Resolved::ArrayObject(false),
-            Value::String(s) => Resolved::Rendered(s.clone()),
-            Value::Bool(b) => Resolved::Rendered(if *b { "true" } else { "false" }.to_string()),
-            Value::Number(n) => Resolved::Rendered(format_number(*n)),
-            Value::Null => Resolved::Rendered("null".to_string()),
-        }),
-        Lookup::Unknown => {
-            // Not a host binding: built-in metadata?
-            if built_in_metadata_name(key) {
-                if let Some(value) = metadata(host, identity, key) {
-                    return Ok(Resolved::Rendered(value));
-                }
-            }
-            Ok(Resolved::Unknown)
-        }
-    }
-}
-
-/// Plain value lookup: `root`, `root.member`, `root[0].member`, ...
-/// A missing binding, missing member or out-of-range element is `Unknown`
-/// (the reference treats it as an unresolved value that renders literally);
-/// accessing a member/element on the wrong value type is an error.
-fn lookup<'h>(host: &'h dyn RenderHost, key: &str) -> Result<Lookup<'h>, RenderError> {
-    let bytes = key.as_bytes();
-    let mut pos = 0;
-    let first = bytes[pos];
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return Ok(Lookup::Unknown);
-    }
-    pos += 1;
-    while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
-        pos += 1;
-    }
-    let root = &key[..pos];
-
-    let Some(mut current) = host.binding(root) else {
-        return Ok(Lookup::Unknown);
-    };
-
-    while pos < bytes.len() {
-        let c = bytes[pos];
-        if c == b'.' {
-            pos += 1;
-            let start = pos;
-            while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
-                pos += 1;
-            }
-            let member = &key[start..pos];
-            match current {
-                Value::Object(map) => match map.get(member) {
-                    Some(next) => current = next,
-                    None => return Ok(Lookup::Unknown),
-                },
-                _ => {
-                    return Err(RenderError::new(
-                        ErrorKind::Render,
-                        format!(
-                            "cannot access member '{member}' because the current JSON value is not an object"
-                        ),
-                    ));
-                }
-            }
-        } else if c == b'[' {
-            pos += 1;
-            let start = pos;
-            while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                pos += 1;
-            }
-            if pos == start || pos >= bytes.len() || bytes[pos] != b']' {
-                return Ok(Lookup::Unknown);
-            }
-            let index = key[start..pos].parse::<usize>().unwrap_or(usize::MAX);
-            pos += 1;
-            match current {
-                Value::Array(array) => match array.get(index) {
-                    Some(next) => current = next,
-                    None => return Ok(Lookup::Unknown),
-                },
-                _ => {
-                    return Err(RenderError::new(
-                        ErrorKind::Render,
-                        format!(
-                            "cannot access element {index} because the current JSON value is not an array"
-                        ),
-                    ));
-                }
-            }
-        } else {
-            return Ok(Lookup::Unknown);
-        }
-    }
-
-    Ok(Lookup::Found(current))
-}
-
 /// Scalar rendering: strings verbatim; numbers/bools/null as compact JSON
 /// (matching the reference). Number formatting reproduces the reference's
 /// `std::to_chars` rules exactly, verified against a differential battery
@@ -649,6 +551,18 @@ fn format_number(n: f64) -> String {
         return format!("{}", n);
     }
     format_general15(n)
+}
+
+/// Scalar rendering for `$[...]`: strings verbatim; numbers/bools/null via the
+/// reference's compact JSON rules.
+fn render_expression_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Value::Number(n) => format_number(*n),
+        Value::Null => "null".to_string(),
+        Value::Array(_) | Value::Object(_) => unreachable!("handled by the caller"),
+    }
 }
 
 /// `std::to_chars(value, general, 15)`-equivalent formatting.
@@ -696,7 +610,7 @@ fn fixed_notation(mantissa: &str, exp: i32) -> String {
     }
 }
 
-fn built_in_metadata_name(key: &str) -> bool {
+pub(crate) fn built_in_metadata_name(key: &str) -> bool {
     matches!(
         key,
         "title"
@@ -715,7 +629,11 @@ fn built_in_metadata_name(key: &str) -> bool {
     )
 }
 
-fn metadata(host: &dyn RenderHost, identity: &RenderIdentity, key: &str) -> Option<String> {
+pub(crate) fn metadata(
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    key: &str,
+) -> Option<String> {
     match key {
         "title" => Some(identity.title.clone().unwrap_or_default()),
         "name" => Some(identity.name.clone().unwrap_or_default()),
@@ -743,44 +661,7 @@ fn metadata(host: &dyn RenderHost, identity: &RenderIdentity, key: &str) -> Opti
     }
 }
 
-/// NR2 condition evaluator: scalar literals, plain value lookups and built-in
-/// metadata, with reference truthiness (bool, null, number!=0, non-empty
-/// string/array/object). The semantic resolution layers mirror `$[...]`:
-/// host binding > built-in metadata (so a Context/Engine title binding still
-/// beats the built-in title metadata). Comparisons, negation and expression
-/// functions are NR3.
-fn evaluate_condition(
-    host: &dyn RenderHost,
-    identity: &RenderIdentity,
-    expression: &str,
-) -> Result<bool, RenderError> {
-    let expression = expression.trim();
-    if expression.is_empty() {
-        return Err(RenderError::new(
-            ErrorKind::Parse,
-            "@if condition cannot be empty",
-        ));
-    }
-    if let Some(value) = scalar_literal(expression) {
-        return Ok(truthy(&value));
-    }
-    match lookup(host, expression)? {
-        Lookup::Found(value) => Ok(truthy(value)),
-        Lookup::Unknown => {
-            if built_in_metadata_name(expression) {
-                if let Some(value) = metadata(host, identity, expression) {
-                    return Ok(!value.is_empty());
-                }
-            }
-            Err(RenderError::new(
-                ErrorKind::Render,
-                format!("unknown value or malformed expression: {expression}"),
-            ))
-        }
-    }
-}
-
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Bool(b) => *b,
         Value::Null => false,
@@ -789,22 +670,6 @@ fn truthy(value: &Value) -> bool {
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
     }
-}
-
-fn scalar_literal(text: &str) -> Option<Value> {
-    match text {
-        "true" => return Some(Value::boolean(true)),
-        "false" => return Some(Value::boolean(false)),
-        "null" => return Some(Value::null()),
-        _ => {}
-    }
-    let quoted = text.len() >= 2
-        && ((text.starts_with('"') && text.ends_with('"'))
-            || (text.starts_with('\'') && text.ends_with('\'')));
-    if quoted {
-        return Some(Value::string(&text[1..text.len() - 1]));
-    }
-    text.parse::<f64>().ok().map(Value::number)
 }
 
 fn resolve_source(
