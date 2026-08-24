@@ -5,7 +5,9 @@
 
 use nift::context::Context;
 use nift::{Engine, Source};
+use std::collections::BTreeSet;
 use std::io::{self, BufRead};
+use std::sync::{Arc, Mutex};
 
 fn json_escape(text: &str) -> String {
     let mut out = String::new();
@@ -60,9 +62,39 @@ fn main() {
         args[7].clone()
     };
     let mode = args.get(8).map(|m| m.as_str()).unwrap_or("composed");
+    let seam = args.get(9).map(|s| s.as_str()).unwrap_or("-");
 
     let mut engine = Engine::new();
     engine.set_root(root);
+    let loader_keys = Arc::new(Mutex::new(BTreeSet::new()));
+    if seam == "loader" {
+        let keys = Arc::clone(&loader_keys);
+        engine.set_loader(move |key: &str| -> Option<String> {
+            keys.lock()
+                .expect("loader key lock")
+                .insert(key.to_string());
+            if key.ends_with("/templates/template.html") {
+                Some("<main>@content</main>\n".to_string())
+            } else if key.ends_with("/content/blog.html") {
+                Some("<p>LOADER-CONTENT</p>\n".to_string())
+            } else if key.ends_with("/content/post.html") {
+                Some("@input(\"part.html\")\n".to_string())
+            } else if key.ends_with("/content/part.html") {
+                Some("<p>LOADER-PART</p>\n".to_string())
+            } else {
+                None
+            }
+        });
+    }
+    if seam == "env" {
+        engine.set_environment_provider(|name: &str| -> Option<String> {
+            match name {
+                "NIFT_ENV_A" => Some("alpha".to_string()),
+                "NIFT_ENV_B" => Some("beta".to_string()),
+                _ => None,
+            }
+        });
+    }
     for line in io::stdin().lock().lines() {
         let line = line.expect("stdin line");
         if line.is_empty() {
@@ -112,12 +144,29 @@ fn main() {
                 .map(|d| format!("\"{}\"", json_escape(d)))
                 .collect::<Vec<_>>()
                 .join(",");
-            println!(
-                "{{\"ok\":true,\"output\":\"{}\",\"dependencies\":[{}],\"requirements\":[{}]}}",
-                json_escape(&result.output),
-                deps,
-                reqs
-            );
+            if seam == "loader" {
+                let keys = loader_keys
+                    .lock()
+                    .expect("loader key lock")
+                    .iter()
+                    .map(|k| format!("\"{}\"", json_escape(k)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "{{\"ok\":true,\"output\":\"{}\",\"dependencies\":[{}],\"requirements\":[{}],\"loaderKeys\":[{}]}}",
+                    json_escape(&result.output),
+                    deps,
+                    reqs,
+                    keys
+                );
+            } else {
+                println!(
+                    "{{\"ok\":true,\"output\":\"{}\",\"dependencies\":[{}],\"requirements\":[{}]}}",
+                    json_escape(&result.output),
+                    deps,
+                    reqs
+                );
+            }
         }
         Err(error) => {
             println!(
