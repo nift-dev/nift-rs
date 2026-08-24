@@ -248,6 +248,10 @@ fn concurrent_render_and_reload() {
     let engine = Arc::new(Engine::open(&root).unwrap());
     assert!(engine.is_open());
 
+    // All render threads and the reloader start behind one barrier so the
+    // reloads genuinely overlap with renders (otherwise a fast reloader could
+    // finish first and every render would observe the final generation only).
+    let start = Arc::new(Barrier::new(RENDER_THREADS + 1));
     let renders_ok = Arc::new(AtomicBool::new(true));
     let saw_a = Arc::new(AtomicBool::new(false));
     let saw_b = Arc::new(AtomicBool::new(false));
@@ -257,7 +261,9 @@ fn concurrent_render_and_reload() {
         let renders_ok = Arc::clone(&renders_ok);
         let saw_a = Arc::clone(&saw_a);
         let saw_b = Arc::clone(&saw_b);
+        let start = Arc::clone(&start);
         workers.push(std::thread::spawn(move || {
+            start.wait();
             for _ in 0..ITERATIONS {
                 let result = match engine.render_page("about", &Context::new()) {
                     Ok(result) => result,
@@ -290,8 +296,10 @@ fn concurrent_render_and_reload() {
     let reloads_ok = Arc::new(AtomicBool::new(true));
     let engine_reloader = Arc::clone(&engine);
     let reloads_ok_2 = Arc::clone(&reloads_ok);
+    let start = Arc::clone(&start);
     let root2 = root.clone();
     let reloader = std::thread::spawn(move || {
+        start.wait();
         for i in 0..RELOADS {
             if i % 5 == 4 {
                 write_file_atomic(&root2.join(".nift/tracked.json"), "{ not json");

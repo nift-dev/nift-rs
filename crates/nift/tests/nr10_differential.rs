@@ -72,7 +72,7 @@ fn harness_bins() -> (Option<PathBuf>, PathBuf) {
         .ok()
         .map(PathBuf::from)
         .or_else(|| {
-            let p = crate_dir.join("../../../nift-embed/.build/engine-harness");
+            let p = windows_exe(crate_dir.join("../../../nift-embed/.build/engine-harness"));
             if p.is_file() {
                 Some(p)
             } else {
@@ -101,7 +101,13 @@ fn windows_exe(path: PathBuf) -> PathBuf {
     path
 }
 
-fn run_harness(bin: &Path, root: &Path, case: &Case) -> String {
+struct HarnessOutput {
+    stdout: String,
+    stderr: String,
+    status: i32,
+}
+
+fn run_harness(bin: &Path, root: &Path, case: &Case) -> HarnessOutput {
     let mut child = Command::new(bin)
         .arg(root)
         .arg(if case.page.is_empty() {
@@ -138,6 +144,7 @@ fn run_harness(bin: &Path, root: &Path, case: &Case) -> String {
         .arg(case.seam)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to run {}: {e}", bin.display()));
     let mut input = String::new();
@@ -154,7 +161,11 @@ fn run_harness(bin: &Path, root: &Path, case: &Case) -> String {
         .write_all(input.as_bytes())
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    String::from_utf8(output.stdout).expect("harness stdout is UTF-8")
+    HarnessOutput {
+        stdout: String::from_utf8(output.stdout).expect("harness stdout is UTF-8"),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        status: output.status.code().unwrap_or(-1),
+    }
 }
 
 fn static_cases() -> Vec<Case> {
@@ -867,11 +878,24 @@ fn expanded_behavioural_differential() {
     for case in &cases {
         let cpp_out = run_harness(&cpp, &root, case);
         let rust_out = run_harness(&rust, &root, case);
-        if cpp_out != rust_out {
-            mismatches.push(format!(
+        if cpp_out.stdout != rust_out.stdout {
+            let mut detail = format!(
                 "case '{}':\n  C++ : {}\n  Rust: {}",
-                case.name, cpp_out, rust_out
-            ));
+                case.name, cpp_out.stdout, rust_out.stdout
+            );
+            if !cpp_out.stderr.is_empty() || cpp_out.status != 0 {
+                detail.push_str(&format!(
+                    "\n  [C++ status={} stderr={:?}]",
+                    cpp_out.status, cpp_out.stderr
+                ));
+            }
+            if !rust_out.stderr.is_empty() || rust_out.status != 0 {
+                detail.push_str(&format!(
+                    "\n  [Rust status={} stderr={:?}]",
+                    rust_out.status, rust_out.stderr
+                ));
+            }
+            mismatches.push(detail);
         }
     }
 

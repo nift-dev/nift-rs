@@ -368,6 +368,12 @@ fn invalid_state_parity() {
     ];
 
     for test in cases {
+        // A leading-slash tracked name is absolute only on POSIX; on Windows a
+        // bare "/abs" has no drive prefix, so both implementations accept it
+        // (see nr10_portability). Skip the platform-specific case there.
+        if cfg!(windows) && test.name == "bad-name-absolute" {
+            continue;
+        }
         let root = fixture(&format!("invalid-{}", test.name));
         if let Some(config) = test.config {
             write_file(&root.join(".nift/config.json"), config);
@@ -784,7 +790,8 @@ fn absolute_content_dir_geometry() {
     let abs = std::env::temp_dir().join(format!("nift-nr7-abs-content-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&abs);
     std::fs::create_dir_all(&abs).unwrap();
-    let content_dir = abs.to_string_lossy().to_string();
+    // The path is embedded in JSON, so backslashes (Windows) must be escaped.
+    let content_dir = abs.to_string_lossy().replace('\\', "\\\\");
     write_file(
         &root.join(".nift/config.json"),
         &format!(r#"{{"config":{{"content-dir":"{content_dir}"}}}}"#),
