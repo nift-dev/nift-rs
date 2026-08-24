@@ -48,8 +48,11 @@ if ! command -v "$HASH_TOOL" >/dev/null 2>&1; then
     fi
 fi
 
+# `tr -d '\r'` strips the CR that the MSYS/Git-Bash runtime injects into pipe
+# output on Windows (LF -> CRLF in text mode), so the manifest comparison stays
+# byte-exact with the LF committed manifest on every platform.
 hash_tree() {
-    (cd "$HERE" && find $CANONICAL_ASSETS -type f | LC_ALL=C sort | xargs $HASH_TOOL)
+    (cd "$HERE" && find $CANONICAL_ASSETS -type f | LC_ALL=C sort | xargs $HASH_TOOL | tr -d '\r')
 }
 
 case "$MODE" in
