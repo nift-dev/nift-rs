@@ -28,7 +28,8 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
-        run: cargo test
+        shell: bash
+        run: PA_CONFORMANCE_ENV=hello-from-env cargo test
       - name: Verify canonical corpus mirror integrity
         shell: bash
         run: bash corpus/sync_corpus.sh verify

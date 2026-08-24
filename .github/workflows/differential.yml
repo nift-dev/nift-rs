@@ -89,5 +89,7 @@ jobs:
           cd nift-rs
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
+          # The getenv corpus golden needs the provider value the conformance
+          # driver sets.
+          PA_CONFORMANCE_ENV=hello-from-env cargo test --workspace
           bash corpus/sync_corpus.sh verify
