@@ -13,14 +13,48 @@
 //! explicit architectural decision and review. Malformed/external input is
 //! handled as `Result`/error values, never panics.
 //!
-//! # NR1 status
+//! # The rendering surface
 //!
-//! This checkpoint implements only the frozen foundational Rust model:
-//! the value data model, request context, source input, typed errors/results,
-//! engine-default bindings and the foundational precedence contract. No Nift
-//! template parser or directive is implemented yet (NR2+). Notably absent
-//! until their owning checkpoints: template/JSON parsing (NR4), `@json`-style
-//! `set_json` text handling (NR4), and the `Engine` serving surface (NR6).
+//! The complete surface spans the frozen NR0–NR12 programme:
+//!
+//! - [`Value`] — null/bool/number/string/array/object with structured
+//!   construction and insertion-order object semantics.
+//! - [`Context`] — per-render overlays (bindings, page name, title, current
+//!   output) resolved before Engine defaults.
+//! - [`Source`] — text or path sources.
+//! - [`Engine`] — the public serving surface: standalone rendering
+//!   ([`Engine::render`], [`Engine::render_partial`]), project-aware
+//!   construction ([`Engine::open`], [`Engine::project`]), project-aware
+//!   rendering ([`Engine::render_page`]), and the atomic reload lifecycle
+//!   ([`Engine::reload`]). One Engine per process, configured once and shared
+//!   across concurrent renders.
+//! - The parser/evaluator implements the full template surface: literals,
+//!   escaping, comments, `$[...]` expressions (bindings, metadata,
+//!   arithmetic/comparison/logical/ternary), `@if`/`@else if`/`@else`,
+//!   `@for` over arrays and objects with loop metadata and sorting, collection
+//!   directives, `@content`, `@input`, `@json` + JSON Schema, `@getenv`,
+//!   `@dep`, `@ent`, `@pathto`/`@pathtofile`/`@pathtopage`, and primary
+//!   pagination for tracked pages.
+//!
+//! # Conformance
+//!
+//! The crate is gated by the canonical conformance corpus (see
+//! `corpus/`): every parity page renders byte-identically to its golden
+//! output/dependencies/requirements, project-state and runtime reject classes
+//! match, and a cross-implementation differential battery (C++ Engine vs Rust
+//! Engine) runs 106 cases with zero divergence on Linux, macOS and Windows.
+//!
+//! # Performance note (NR12)
+//!
+//! `render` evaluates source templates at call time (matching the frozen C++
+//! reference, which re-parses per render); there is no compiled-template
+//! cache yet, so per-render cost is higher than template engines that compile
+//! once (Tera/MiniJinja/Askama). The crate is faster than the reference C++
+//! Engine on the representative benchmark. A compiled-template cache is the
+//! natural future optimization.
+//!
+//! See `examples/ssr_demo.rs` for a server-side rendering walkthrough and
+//! `examples/bench.rs` for the NR12 comparison benchmarks.
 
 pub mod bindings;
 pub mod context;

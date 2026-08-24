@@ -27,3 +27,19 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [[example]]
 name = "engine_harness"
 path = "examples/engine_harness.rs"
+
+[[example]]
+name = "ssr_demo"
+path = "examples/ssr_demo.rs"
+
+[[example]]
+name = "bench"
+path = "examples/bench.rs"
+
+[dev-dependencies]
+# NR12 comparison benchmarks: representative Rust template engines with
+# equivalent templates.
+tera = "1"
+minijinja = "2"
+askama = "0.12"
+serde_json = "1"
