@@ -82,7 +82,12 @@ fn harness_bins() -> (Option<PathBuf>, PathBuf) {
     let rust = std::env::var("NIFT_RUST_HARNESS")
         .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|| crate_dir.join("../../target/debug/examples/engine_harness"));
+        .unwrap_or_else(|| {
+            let mut p = crate_dir.join("../../target/debug/examples/engine_harness");
+            #[cfg(windows)]
+            p.set_extension("exe");
+            p
+        });
     (cpp, rust)
 }
 

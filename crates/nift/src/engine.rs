@@ -350,7 +350,10 @@ impl<'a> RenderHost for EngineHost<'a> {
 
     fn read_source(&self, path: &Path) -> Result<Cow<'_, str>, RenderError> {
         if let Some(loader) = &self.engine.loader {
-            let key = path.to_string_lossy().to_string();
+            // The reference loader key is lexically_normal().generic_string():
+            // `/` separators even on Windows. Using native separators here
+            // would diverge from the C++ harness keys on Windows.
+            let key = crate::parser::generic(path);
             return loader(&key).map(Cow::Owned).ok_or_else(|| {
                 RenderError::new(
                     ErrorKind::MissingSource,

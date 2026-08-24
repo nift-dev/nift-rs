@@ -2217,8 +2217,17 @@ pub(crate) fn truthy(value: &Value) -> bool {
 }
 
 /// Path spelled with forward slashes (reference generic_string).
-fn generic(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+/// `std::filesystem::path::generic_string()`: the path spelled with `/`
+/// separators regardless of platform. On POSIX the native and generic forms
+/// coincide (a literal backslash inside a filename is preserved); on Windows
+/// the native `\` separator becomes `/`.
+pub(crate) fn generic(path: &Path) -> String {
+    let native = path.to_string_lossy().to_string();
+    if std::path::MAIN_SEPARATOR == '/' {
+        native
+    } else {
+        native.replace('\\', "/")
+    }
 }
 
 /// The path/URL emitted by @pathto/@pathtofile (reference `path_to`): current

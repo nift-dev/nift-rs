@@ -117,11 +117,12 @@ fn engine_loader_and_environment_seams() {
     // loader receives root-resolved absolute path keys (matching the
     // reference standalone Engine host).
     let root = temp_root();
-    let template_key = root
-        .join("templates/template.html")
-        .to_string_lossy()
-        .to_string();
-    let page_key = root.join("content/page.html").to_string_lossy().to_string();
+    // Loader keys use the reference generic spelling (`/` separators even on
+    // Windows), matching the Engine's `lexically_normal().generic_string()`
+    // key form.
+    let generic_key = |path: PathBuf| path.to_string_lossy().replace('\\', "/");
+    let template_key = generic_key(root.join("templates/template.html"));
+    let page_key = generic_key(root.join("content/page.html"));
     let sources = [
         (template_key, "<main>@content</main>".to_string()),
         (
