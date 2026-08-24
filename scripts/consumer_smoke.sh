@@ -23,7 +23,9 @@ nift = { path = "$NIFT_CRATE" }
 EOF
 
 cat >"$TMP/consumer/src/main.rs" <<'EOF'
-// A normal downstream crate using only the documented public API.
+// A normal downstream crate using only the documented public API: the crate
+// root re-exports Engine/RenderError; Context and Source are public modules
+// (nift::context / nift::source), matching the README.
 use nift::context::Context;
 use nift::source::Source;
 use nift::{Engine, RenderError};
