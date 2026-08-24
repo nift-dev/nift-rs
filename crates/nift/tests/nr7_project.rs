@@ -756,7 +756,10 @@ fn symlink_contract_escape_rejected() {
     let outside = fixture("symlink-outside");
     std::fs::write(outside.join("secret.json"), "{}").unwrap();
     let _ = std::fs::remove_file(root.join("content/link.json"));
-    if !make_symlink(&outside.join("secret.json"), &root.join("content/link.json")) {
+    if !make_symlink(
+        &outside.join("secret.json"),
+        &root.join("content/link.json"),
+    ) {
         // Platform without symlink support/privilege: skip.
         return;
     }
