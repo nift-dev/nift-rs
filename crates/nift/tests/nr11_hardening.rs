@@ -276,19 +276,85 @@ fn fuzz_random_templates_never_panic() {
     }
 }
 
+/// A deterministic random JSON value with bounded nesting: null/bool/number/
+/// string (including Unicode and control characters)/array/object, plus empty
+/// containers and scalars, so member lookup, iteration and expressions see a
+/// wide spread of shapes.
+fn random_value(rng: &mut XorShift64, depth: usize) -> nift::Value {
+    const MAX_DEPTH: usize = 3;
+    if depth >= MAX_DEPTH {
+        return random_scalar(rng);
+    }
+    match rng.next_usize(7) {
+        0 => nift::Value::null(),
+        1 => nift::Value::boolean(rng.next_usize(2) == 0),
+        2 => nift::Value::number((rng.next_usize(1_000_000) as f64 - 500_000.0) / 3.0),
+        3 => nift::Value::string(random_string(rng)),
+        4 => {
+            let mut items = Vec::new();
+            for _ in 0..rng.next_usize(4) {
+                items.push(random_value(rng, depth + 1));
+            }
+            nift::Value::Array(items)
+        }
+        5 => {
+            let mut members = indexmap::IndexMap::new();
+            for _ in 0..rng.next_usize(4) {
+                let key = format!("k{}", rng.next_usize(100));
+                members.insert(key, random_value(rng, depth + 1));
+            }
+            nift::Value::Object(members)
+        }
+        _ => random_scalar(rng),
+    }
+}
+
+fn random_scalar(rng: &mut XorShift64) -> nift::Value {
+    match rng.next_usize(4) {
+        0 => nift::Value::null(),
+        1 => nift::Value::boolean(rng.next_usize(2) == 0),
+        2 => nift::Value::number((rng.next_usize(1_000_000) as f64 - 500_000.0) / 3.0),
+        _ => nift::Value::string(random_string(rng)),
+    }
+}
+
+fn random_string(rng: &mut XorShift64) -> String {
+    const CHARS: &[&str] = &[
+        "a", "b", " ", "\u{0}", "\n", "\t", "\r", "\"", "'", "\\", "$", "@", "[", "]", "{", "}",
+        ":", "=", "?", "é", "日", "🚀", "\u{200d}", "1", "-", ".", "true", "中", "汉", "λ",
+    ];
+    let len = rng.next_usize(10);
+    (0..len).map(|_| *rng.pick(CHARS)).collect::<String>()
+}
+
 #[test]
 fn fuzz_random_bindings_never_panic() {
     let defaults = Bindings::new();
-    let context = Context::new();
-    let host = make_host(&defaults, &context);
     let identity = RenderIdentity::new().name("fuzz").title("Fuzz");
 
     let mut rng = XorShift64::new(0xBEEF_0000_0000_0003);
-    let template = "@if(x){$[y.z]}@for(k : items){$[k.a]@getenv(PA_NR11)}@content";
+    let template = "@if(x){$[y.z]}@for(k : items){<$[k.a]>$[k]}@getenv(PA_NR11)$[s]$[n]$[b]$[o]";
     for _ in 0..fuzz_iterations() {
-        // Render the same template with different (random) bindings.
-        render_total(&host, &identity, template, true);
-        let _ = rng.next_u64();
+        // The RNG materially determines the binding tree: varying names and
+        // shapes (null/bool/number/string/array/object, nested, empty, Unicode)
+        // are presented to an adversarial template that does member lookup,
+        // iteration and expressions against them.
+        let mut context = Context::new();
+        let binding_count = 1 + rng.next_usize(5);
+        let names = ["x", "y", "items", "s", "n", "b", "o", "arr"];
+        for _ in 0..binding_count {
+            let name = *rng.pick(&names);
+            let value = random_value(&mut rng, 0);
+            let _ = context.set(name.to_string(), value);
+        }
+        let host = InMemoryHost::new(&defaults, &context, PathBuf::from("/fuzz"))
+            .with_env("PA_NR11", "env-val");
+        let _ = render(
+            &host,
+            &identity,
+            &Source::text(template),
+            Some(&Source::text("<p>page</p>")),
+        );
     }
 }
 
