@@ -1,0 +1,8 @@
+# The canonical corpus mirror must stay byte-identical to the frozen C++
+# reference across every platform and checkout: no line-ending conversion
+# (git autocrlf on Windows would turn LF into CRLF and break the hash
+# verification).
+corpus/** -text
+
+# Shell scripts keep LF endings (they run in CI Git-Bash on Windows).
+*.sh text eol=lf

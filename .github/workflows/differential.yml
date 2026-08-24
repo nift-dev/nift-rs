@@ -56,12 +56,19 @@ jobs:
           fi
           make -j2
           mkdir -p .build
+          # -static on Windows so the harness needs no runtime DLLs when the
+          # Rust test spawns it from a Git-Bash shell without msys2 in PATH.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            STATIC_FLAGS="-static"
+          else
+            STATIC_FLAGS=""
+          fi
           g++ -Isrc -Iinclude -Iminifypp/include -Iminifypp/src -std=c++17 -O1 -g \
             tests/engine_harness.cpp \
             src/Engine.o src/Context.o src/Value.o src/FileSystem.o src/JsonFile.o \
             src/JsonSchema.o minifypp/src/Minify.o src/Parser.o src/ProjectInfo.o \
             src/ProjectRead.o src/ProjectState.o src/WatchList.o src/BuildProgress.o \
-            -pthread -o .build/engine-harness
+            -pthread $STATIC_FLAGS -o .build/engine-harness
       - name: Build Rust harness
         shell: bash
         run: |
