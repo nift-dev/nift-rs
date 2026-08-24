@@ -30,6 +30,7 @@ pub mod expr;
 pub mod host;
 pub mod hosts;
 pub mod parser;
+pub mod project;
 pub mod result;
 pub mod source;
 pub mod value;
@@ -41,6 +42,9 @@ pub use error::{BindingError, ErrorKind, RenderError};
 pub use host::{RenderHost, RenderIdentity};
 pub use hosts::{FilesystemHost, InMemoryHost};
 pub use parser::render;
+pub use project::{
+    mapped_name, ProjectConfig, ProjectError, ProjectErrorKind, ProjectState, TrackedInfo,
+};
 pub use result::RenderResult;
 pub use source::Source;
 pub use value::{Value, ValueError};
