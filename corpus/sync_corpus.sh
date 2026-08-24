@@ -48,11 +48,14 @@ if ! command -v "$HASH_TOOL" >/dev/null 2>&1; then
     fi
 fi
 
-# `tr -d '\r'` strips the CR that the MSYS/Git-Bash runtime injects into pipe
-# output on Windows (LF -> CRLF in text mode), so the manifest comparison stays
-# byte-exact with the LF committed manifest on every platform.
+# Portability of the hash output to the committed manifest format:
+#  - `tr -d '\r'` strips the CR the MSYS/Git-Bash runtime injects into pipe
+#    output on Windows (LF -> CRLF in text mode);
+#  - the binary-mode `*` marker and single space some sha256sum builds emit
+#    (`<hash> *path`) are normalised to the GNU two-space form (`<hash>  path`)
+#    used by the committed manifest.
 hash_tree() {
-    (cd "$HERE" && find $CANONICAL_ASSETS -type f | LC_ALL=C sort | xargs $HASH_TOOL | tr -d '\r')
+    (cd "$HERE" && find $CANONICAL_ASSETS -type f | LC_ALL=C sort | xargs $HASH_TOOL | tr -d '\r' | sed -E 's/^([0-9a-f]{64})[ *]+/\1  /')
 }
 
 case "$MODE" in
