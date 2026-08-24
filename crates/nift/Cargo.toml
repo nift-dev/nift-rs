@@ -23,3 +23,7 @@ regex = "1"
 # Only these explicitly time-dependent built-ins use a clock; deterministic
 # metadata and rendering never depend on the current time.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[[example]]
+name = "engine_harness"
+path = "examples/engine_harness.rs"

@@ -169,7 +169,14 @@ impl<'a> RenderHost for EngineHost<'a> {
 
     fn relative(&self, path: &Path) -> String {
         path.strip_prefix(&self.engine.root)
-            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .map(|rel| {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if rel.is_empty() {
+                    ".".to_string()
+                } else {
+                    rel
+                }
+            })
             .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
     }
 

@@ -88,7 +88,14 @@ impl<'a> RenderHost for InMemoryHost<'a> {
     fn relative(&self, path: &Path) -> String {
         let normalized = path;
         match normalized.strip_prefix(&self.root) {
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Ok(rel) => {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if rel.is_empty() {
+                    ".".to_string()
+                } else {
+                    rel
+                }
+            }
             Err(_) => normalized.to_string_lossy().replace('\\', "/"),
         }
     }
@@ -204,7 +211,14 @@ impl<'a> RenderHost for FilesystemHost<'a> {
 
     fn relative(&self, path: &Path) -> String {
         match path.strip_prefix(&self.root) {
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Ok(rel) => {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if rel.is_empty() {
+                    ".".to_string()
+                } else {
+                    rel
+                }
+            }
             Err(_) => path.to_string_lossy().replace('\\', "/"),
         }
     }

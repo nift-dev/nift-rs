@@ -41,6 +41,11 @@ pub fn render(
 ) -> Result<RenderResult, RenderError> {
     let (template_text, template_identity) = resolve_source(host, template)?;
     let mut state = RenderState::default();
+    // Reference: a path-backed template registers its root-relative identity as
+    // a dependency.
+    if let Source::Path(_) = template {
+        state.dependencies.insert(host.relative(&template_identity));
+    }
     state
         .input_stack
         .push(template_identity.to_string_lossy().to_string());
@@ -1077,11 +1082,20 @@ fn parse(
                     &content_text,
                     &content_identity,
                     depth + 1,
-                )?;
+                );
                 if identity_tracked {
                     state.input_stack.pop();
                 }
-                output += &nested;
+                let nested = nested?;
+                // Reference: @content inserts the page through append_indented,
+                // which strips the page's single trailing newline and applies
+                // the current indentation.
+                let insertion_code_block_depth = state.code_block_depth;
+                let indent = insertion_indent(&output);
+                append_indented(&mut output, &nested, &indent, insertion_code_block_depth);
+                if let Source::Path(_) = page {
+                    state.dependencies.insert(host.relative(&content_identity));
+                }
                 i = end;
                 continue;
             }
