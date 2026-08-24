@@ -113,11 +113,13 @@ pub trait RenderHost {
         None
     }
 
-    /// Whether a render currently has an output location (NR5). Standalone
-    /// hosts with real output geometry report true; a project-aware host
-    /// always does. @pathto requires this.
+    /// Whether a render currently has an output location (NR5). The default is
+    /// conservative: no output context unless a Host explicitly provides one.
+    /// Standalone hosts report whether the caller supplied
+    /// `Context::set_current_output`; a project-aware host always has one
+    /// (tracked output geometry). @pathto requires this.
     fn has_output_context(&self) -> bool {
-        true
+        false
     }
 
     /// The generated output directory relative to the root (the 404 rule's web

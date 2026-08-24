@@ -105,6 +105,13 @@ impl<'a> RenderHost for InMemoryHost<'a> {
     }
 
     fn output_path(&self, identity: &RenderIdentity) -> PathBuf {
+        // An explicit caller-supplied current output is authoritative for
+        // standalone rendering; otherwise the page's generated output geometry
+        // is synthesized (used by metadata; @pathto is rejected before reaching
+        // geometry when there is no output context).
+        if let Some(current) = self.context.current_output() {
+            return current.to_path_buf();
+        }
         match &identity.name {
             Some(name) => self.root.join(&self.output_dir).join(format!(
                 "{}{}",
@@ -113,6 +120,10 @@ impl<'a> RenderHost for InMemoryHost<'a> {
             )),
             None => self.root.join(&self.output_dir),
         }
+    }
+
+    fn has_output_context(&self) -> bool {
+        self.context.current_output().is_some()
     }
 
     fn read_source(&self, path: &Path) -> Result<Cow<'_, str>, RenderError> {
@@ -210,6 +221,13 @@ impl<'a> RenderHost for FilesystemHost<'a> {
     }
 
     fn output_path(&self, identity: &RenderIdentity) -> PathBuf {
+        // An explicit caller-supplied current output is authoritative for
+        // standalone rendering; otherwise the page's generated output geometry
+        // is synthesized (used by metadata; @pathto is rejected before reaching
+        // geometry when there is no output context).
+        if let Some(current) = self.context.current_output() {
+            return current.to_path_buf();
+        }
         match &identity.name {
             Some(name) => self.root.join(&self.output_dir).join(format!(
                 "{}{}",
@@ -218,6 +236,10 @@ impl<'a> RenderHost for FilesystemHost<'a> {
             )),
             None => self.root.join(&self.output_dir),
         }
+    }
+
+    fn has_output_context(&self) -> bool {
+        self.context.current_output().is_some()
     }
 
     fn read_source(&self, path: &Path) -> Result<Cow<'_, str>, RenderError> {

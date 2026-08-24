@@ -30,10 +30,16 @@ fn write_project(root: &std::path::Path) {
     write_file(&root.join("public/about.html"), "<p>about</p>");
 }
 
+fn fs_context(root: &std::path::Path) -> Context {
+    let mut context = Context::new();
+    context.set_current_output(root.join("public/t.html"));
+    context
+}
+
 fn fs_render(root: &std::path::Path, template: &str) -> nift::RenderResult {
     write_file(&root.join("content/t.html"), template);
     let defaults = Bindings::new();
-    let context = Context::new();
+    let context = fs_context(root);
     let host = FilesystemHost::new(&defaults, &context, root);
     let identity = RenderIdentity::new().name("t").title("T");
     render(&host, &identity, &Source::path("content/t.html"), None).expect("render should succeed")
@@ -42,7 +48,7 @@ fn fs_render(root: &std::path::Path, template: &str) -> nift::RenderResult {
 fn fs_render_err(root: &std::path::Path, template: &str) -> nift::RenderError {
     write_file(&root.join("content/t.html"), template);
     let defaults = Bindings::new();
-    let context = Context::new();
+    let context = fs_context(root);
     let host = FilesystemHost::new(&defaults, &context, root);
     let identity = RenderIdentity::new().name("t").title("T");
     render(&host, &identity, &Source::path("content/t.html"), None).expect_err("render should fail")
@@ -87,7 +93,7 @@ fn pathto_404_root_absolute() {
         "@pathto('public/about.html')",
     );
     let defaults = Bindings::new();
-    let context = Context::new();
+    let context = fs_context(&root);
     let host = FilesystemHost::new(&defaults, &context, &root);
     let identity = RenderIdentity::new().name("404").title("Not Found");
     let result = render(&host, &identity, &Source::path("content/404.html"), None)
@@ -170,6 +176,10 @@ impl<'a> RenderHost for TrackedHost<'a> {
     fn tracked_output_path(&self, name: &str) -> Option<(PathBuf, bool)> {
         self.tracked.get(name).cloned()
     }
+
+    fn has_output_context(&self) -> bool {
+        true
+    }
 }
 
 #[test]
@@ -217,5 +227,125 @@ fn pathtopage_requires_pagination() {
         .contains("resolved page must be between 1 and 1"));
     let error = fs_render_err(&root, "@pathtopage(0)");
     assert!(error.message.contains("positive integer"));
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn pathto_requires_explicit_output_context() {
+    let root = temp_root();
+    write_project(&root);
+    // No current_output -> @pathto is a controlled requires-context error.
+    let defaults = Bindings::new();
+    let context = Context::new();
+    let host = FilesystemHost::new(&defaults, &context, &root);
+    let identity = RenderIdentity::new().name("t").title("T");
+    let error = render(
+        &host,
+        &identity,
+        &Source::text("@pathto('public/app.js')"),
+        None,
+    )
+    .expect_err("@pathto without an output context must fail");
+    assert!(error.message.contains("requires a path context"));
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn pathto_uses_explicit_current_output() {
+    let root = temp_root();
+    write_project(&root);
+    // Explicit root-level current output.
+    let defaults = Bindings::new();
+    let mut context = Context::new();
+    context.set_current_output(root.join("public/custom.html"));
+    let host = FilesystemHost::new(&defaults, &context, &root);
+    let identity = RenderIdentity::new().name("t").title("T");
+    let result = render(
+        &host,
+        &identity,
+        &Source::text("@pathto('public/app.js')"),
+        None,
+    )
+    .expect("render should succeed");
+    assert_eq!(result.output, "./app.js");
+    // Nested current output -> ../../app.js.
+    let mut context = Context::new();
+    context.set_current_output(root.join("public/a/b/page.html"));
+    let host = FilesystemHost::new(&defaults, &context, &root);
+    let result = render(
+        &host,
+        &identity,
+        &Source::text("@pathto('public/app.js')"),
+        None,
+    )
+    .expect("render should succeed");
+    assert_eq!(result.output, "../../app.js");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn current_output_differs_from_identity_and_wins() {
+    let root = temp_root();
+    write_project(&root);
+    let defaults = Bindings::new();
+    let mut context = Context::new();
+    context.set_current_output(root.join("runtime/cache/foo/index.html"));
+    let host = FilesystemHost::new(&defaults, &context, &root);
+    let identity = RenderIdentity::new().name("about").title("About");
+    let result = render(
+        &host,
+        &identity,
+        &Source::text("@pathto('public/app.js')"),
+        None,
+    )
+    .expect("render should succeed");
+    assert_eq!(result.output, "../../../public/app.js");
+    // Changing only current_output changes @pathto output.
+    let mut context = Context::new();
+    context.set_current_output(root.join("public/about.html"));
+    let host = FilesystemHost::new(&defaults, &context, &root);
+    let result = render(
+        &host,
+        &identity,
+        &Source::text("@pathto('public/app.js')"),
+        None,
+    )
+    .expect("render should succeed");
+    assert_eq!(result.output, "./app.js");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn pathto_404_with_explicit_context_keeps_root_absolute() {
+    let root = temp_root();
+    write_project(&root);
+    let defaults = Bindings::new();
+    let context = fs_context(&root);
+    let host = FilesystemHost::new(&defaults, &context, &root);
+    let identity = RenderIdentity::new().name("404").title("Not Found");
+    let result = render(
+        &host,
+        &identity,
+        &Source::text("@pathto('public/app.js')"),
+        None,
+    )
+    .expect("render should succeed");
+    assert_eq!(result.output, "/app.js");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn tracked_geometry_works_without_context_current_output() {
+    let defaults = Bindings::new();
+    let context = Context::new(); // no current_output
+    let root = PathBuf::from("/site");
+    let host = TrackedHost::new(&defaults, &context, root.clone())
+        .with_source(root.join("public/about.html"), "<p>about</p>")
+        .with_source(root.join("public/blog/index.html"), "<p>blog</p>");
+    let identity = RenderIdentity::new().name("about").title("About");
+    // The tracked host's output geometry is its own authority.
+    let result = render(&host, &identity, &Source::text("@pathto('blog/')"), None)
+        .expect("render should succeed");
+    assert_eq!(result.output, "blog/");
     std::fs::remove_dir_all(&root).ok();
 }
