@@ -76,6 +76,7 @@ case "$MODE" in
             echo "corpus mirror verified: byte-identical to MANIFEST.sha256"
         else
             echo "corpus mirror MISMATCH: files differ from MANIFEST.sha256" >&2
+            diff -u "$HERE/MANIFEST.sha256" <(hash_tree) >&2 || true
             echo "  - if the canonical corpus changed deliberately, run 'sync' and commit" >&2
             echo "  - otherwise this is an accidental fork of the canonical data" >&2
             exit 1
