@@ -70,6 +70,10 @@ jobs:
       - name: Run expanded behavioural differential corpus
         shell: bash
         run: |
+          # The msys2-built C++ harness needs the msys2 runtime DLLs on PATH.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="/c/msys64/ucrt64/bin:$PATH"
+          fi
           # Construct the C++ harness path in the shell where GITHUB_WORKSPACE
           # actually expands (an env var set from a GitHub expression would
           # carry the literal '$GITHUB_WORKSPACE/...' text instead).

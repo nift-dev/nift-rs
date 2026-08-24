@@ -83,12 +83,22 @@ fn harness_bins() -> (Option<PathBuf>, PathBuf) {
         .ok()
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let mut p = crate_dir.join("../../target/debug/examples/engine_harness");
-            #[cfg(windows)]
-            p.set_extension("exe");
-            p
+            let p = crate_dir.join("../../target/debug/examples/engine_harness");
+            windows_exe(p)
         });
     (cpp, rust)
+}
+
+/// The example binary carries a `.exe` extension on Windows.
+#[cfg(windows)]
+fn windows_exe(mut path: PathBuf) -> PathBuf {
+    path.set_extension("exe");
+    path
+}
+
+#[cfg(not(windows))]
+fn windows_exe(path: PathBuf) -> PathBuf {
+    path
 }
 
 fn run_harness(bin: &Path, root: &Path, case: &Case) -> String {
