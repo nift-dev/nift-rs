@@ -736,6 +736,19 @@ fn tracked_name_backslash_parent_rejected() {
     assert_eq!(error.kind, ProjectErrorKind::TrackingValue);
 }
 
+/// Portable symlink creation (unix `symlink`; Windows `symlink_file`). Returns
+/// `false` on platforms/permits where symlinks cannot be created, so the test
+/// is preserved everywhere and only skipped where the capability is absent.
+#[cfg(unix)]
+fn make_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn make_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
 #[test]
 fn symlink_contract_escape_rejected() {
     let root = fixture("symlink-escape");
@@ -743,10 +756,8 @@ fn symlink_contract_escape_rejected() {
     let outside = fixture("symlink-outside");
     std::fs::write(outside.join("secret.json"), "{}").unwrap();
     let _ = std::fs::remove_file(root.join("content/link.json"));
-    if std::os::unix::fs::symlink(outside.join("secret.json"), root.join("content/link.json"))
-        .is_err()
-    {
-        // Platform without symlink support: skip.
+    if !make_symlink(&outside.join("secret.json"), &root.join("content/link.json")) {
+        // Platform without symlink support/privilege: skip.
         return;
     }
     write_file(

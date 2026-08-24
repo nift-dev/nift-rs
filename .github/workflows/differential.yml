@@ -55,6 +55,7 @@ jobs:
             export PATH="/c/msys64/ucrt64/bin:$PATH"
           fi
           make -j2
+          mkdir -p .build
           g++ -Isrc -Iinclude -Iminifypp/include -Iminifypp/src -std=c++17 -O1 -g \
             tests/engine_harness.cpp \
             src/Engine.o src/Context.o src/Value.o src/FileSystem.o src/JsonFile.o \
