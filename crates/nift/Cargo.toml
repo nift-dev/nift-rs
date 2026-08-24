@@ -7,6 +7,8 @@ license.workspace = true
 description = "Independent Rust implementation of the Nift template language and project-aware rendering engine."
 keywords = ["nift", "templating", "ssr", "static-site"]
 categories = ["template-engine"]
+repository = "https://github.com/nift-dev/nift-rs"
+readme = "README.md"
 
 [lints]
 workspace = true

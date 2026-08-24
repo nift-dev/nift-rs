@@ -8,6 +8,18 @@
 //! and its ns/op included for the same Nift template.
 //!
 //! Run in release: `cargo run --release --example bench`.
+//!
+//! Measured environment (2026-08-24, Ubuntu Linux x86_64):
+//!   rustc      stable (MSRV 1.97), profile.release = { lto = "thin",
+//!              codegen-units = 1 }
+//!   C++        g++ 15.2.0, -std=c++17 -O2 (clean rebuild via
+//!              nift-embed/scripts/bench-release.sh, no ambient .o reused)
+//!   workload   conditional greeting + 10-post loop with interpolation
+//!   samples    7, median reported; warmup 2_000, iterations 50_000
+//! Result: nift-rs ~18.8 us, C++ Engine ~38.2 us (median), Tera ~3.2 us,
+//! MiniJinja ~3.8 us, Askama ~0.5 us. Tera/MiniJinja/Askama compile their
+//! templates once; current Nift re-parses source per render, so those are
+//! context, not an apples-to-apples runtime ranking.
 
 use nift::context::Context;
 use nift::source::Source;
@@ -17,8 +29,9 @@ use std::time::Instant;
 
 const ITERATIONS: u32 = 50_000;
 const WARMUP: u32 = 2_000;
+const SAMPLES: usize = 7;
 
-fn bench<F: FnMut() -> R, R>(mut f: F) -> f64 {
+fn sample<F: FnMut() -> R, R>(mut f: F) -> f64 {
     for _ in 0..WARMUP {
         std::hint::black_box(f());
     }
@@ -27,6 +40,17 @@ fn bench<F: FnMut() -> R, R>(mut f: F) -> f64 {
         std::hint::black_box(f());
     }
     start.elapsed().as_nanos() as f64 / ITERATIONS as f64
+}
+
+/// Run several samples and report the median ns/op (a single timing run can be
+/// noisy; the median is the reported comparative figure).
+fn bench<F: FnMut() -> R + Clone, R>(f: F) -> f64 {
+    let mut results = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        results.push(sample(f.clone()));
+    }
+    results.sort_by(|a, b| a.total_cmp(b));
+    results[SAMPLES / 2]
 }
 
 fn build_posts_json() -> String {
