@@ -22,7 +22,7 @@ use crate::source::Source;
 use crate::value::Value;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A custom source loader: `path -> Option<source>`.
 type SourceLoader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -35,9 +35,23 @@ pub struct Engine {
     defaults: Bindings,
     loader: Option<SourceLoader>,
     environment_provider: Option<EnvironmentProvider>,
-    /// The immutable project snapshot (NR8) when the Engine was constructed via
-    /// [`Engine::open`]; `None` for the deterministic standalone Engine.
-    project: Option<Arc<crate::project::ProjectState>>,
+    /// The published immutable project snapshot generations (NR9). Publication
+    /// is mutex-serialized: a render clones the current generation's `Arc`
+    /// under the lock and then renders on that generation, so an in-flight
+    /// render finishes on the snapshot it started with while a `reload`
+    /// atomically publishes a fresh generation. `None` means no committed
+    /// generation yet (the standalone Engine, or a lifecycle Engine whose
+    /// project has not opened).
+    project: Mutex<ProjectSlot>,
+}
+
+/// The published project state: the committed snapshot generation (if any) plus
+/// the recorded open/reload failure, mirroring the frozen C++ `Impl`
+/// (`project_state`/`project_open_ok`/`project_open_error`).
+#[derive(Debug, Default)]
+struct ProjectSlot {
+    state: Option<Arc<crate::project::ProjectState>>,
+    open_error: Option<crate::project::ProjectError>,
 }
 
 impl Default for Engine {
@@ -55,7 +69,7 @@ impl Engine {
             defaults: Bindings::new(),
             loader: None,
             environment_provider: None,
-            project: None,
+            project: Mutex::new(ProjectSlot::default()),
         }
     }
 
@@ -111,35 +125,84 @@ impl Engine {
 
     /// Project-aware construction (NR8): associate the Engine with a Nift
     /// project at `project_root`, loading and validating `.nift/config.json`
-    /// and `.nift/tracked.json` into an immutable snapshot. The snapshot is
-    /// never mutated and never reloaded implicitly; every `render_page` call
-    /// observes it for the Engine's lifetime. The default Engine stays
-    /// deterministic standalone and never walks the filesystem.
-    ///
-    /// `Engine` remains `Send + Sync` and concurrent `render_page` calls are
-    /// supported; the reload/generation lifecycle is NR9.
+    /// and `.nift/tracked.json` into an immutable snapshot. Returns an error
+    /// (with the project-read semantic class) when the project does not open.
+    /// For the lifecycle-aware, non-throwing construction that can later open
+    /// via [`Engine::reload`], use [`Engine::project`].
     pub fn open(root: impl Into<PathBuf>) -> Result<Engine, crate::project::ProjectError> {
-        let state = crate::project::ProjectState::open(root.into())?;
-        let mut engine = Engine::new();
-        engine.root = state.root().to_path_buf();
-        engine.project = Some(Arc::new(state));
-        Ok(engine)
+        let engine = Engine::project(root);
+        match engine.open_error() {
+            Some(error) => Err(error),
+            None => Ok(engine),
+        }
     }
 
-    /// Whether a project snapshot is loaded (see [`Engine::open`]).
+    /// Lifecycle-aware project construction (NR9): associates the Engine with a
+    /// project root and attempts to open it, but never fails. `is_open()` /
+    /// [`Engine::open_error`] report the outcome, and [`Engine::reload`] can
+    /// later establish the first valid generation once the project exists on
+    /// disk (the frozen "Engine constructed before its project exists" case).
+    /// The default Engine stays deterministic standalone and never walks the
+    /// filesystem.
+    pub fn project(root: impl Into<PathBuf>) -> Engine {
+        let mut engine = Engine::new();
+        engine.root = root.into();
+        let root = engine.root.clone();
+        match crate::project::ProjectState::open(&root) {
+            Ok(state) => {
+                let mut slot = lock(&engine.project);
+                slot.state = Some(Arc::new(state));
+                slot.open_error = None;
+            }
+            Err(error) => {
+                let mut slot = lock(&engine.project);
+                slot.open_error = Some(error);
+            }
+        }
+        engine
+    }
+
+    /// Atomically replaces the published project snapshot generation (NR9):
+    /// builds and fully validates a candidate snapshot, then publishes it under
+    /// the publication lock so in-flight renders finish on the generation they
+    /// started with and later renders observe the new one. A failed reload
+    /// retains the last known-good generation (never fail-closed) and returns
+    /// the candidate error; it never writes to the project. This is also how an
+    /// Engine constructed before its project existed can later open it.
+    ///
+    /// Concurrent `reload` and `render_page` are supported; concurrent reloads
+    /// serialize their publication (the last successful candidate wins). Engine
+    /// defaults and the environment provider are unaffected by a reload.
+    pub fn reload(&self) -> Result<(), crate::project::ProjectError> {
+        let root = self.root.clone();
+        let candidate = crate::project::ProjectState::open(&root)?;
+        let mut slot = lock(&self.project);
+        slot.state = Some(Arc::new(candidate));
+        slot.open_error = None;
+        Ok(())
+    }
+
+    /// Whether a project snapshot generation is currently published (see
+    /// [`Engine::open`] / [`Engine::reload`]).
     pub fn is_open(&self) -> bool {
-        self.project.is_some()
+        lock(&self.project).state.is_some()
+    }
+
+    /// The recorded open/reload failure, when no generation is published.
+    pub fn open_error(&self) -> Option<crate::project::ProjectError> {
+        lock(&self.project).open_error.clone()
     }
 
     /// Project-aware rendering by tracked page name, e.g. `render_page("about")`.
-    /// The page's content/template/output geometry comes from the project
-    /// snapshot; `@pathto`, `@input`, `@json`, contracts, dependencies,
-    /// requirements and the primary pagination output behave exactly like the
-    /// CLI. The page-name argument is authoritative (the Context's page name is
-    /// ignored) and the project defines the current output (a Context output is
-    /// ignored). Context value overlays and the title override Engine defaults
-    /// and the tracked title. A failed project open or an unknown page name is a
-    /// controlled error in the returned `Result`, never a panic.
+    /// The page's content/template/output geometry comes from the published
+    /// project snapshot generation; `@pathto`, `@input`, `@json`, contracts,
+    /// dependencies, requirements and the primary pagination output behave
+    /// exactly like the CLI. The page-name argument is authoritative (the
+    /// Context's page name is ignored) and the project defines the current
+    /// output (a Context output is ignored). Context value overlays and the
+    /// title override Engine defaults and the tracked title. An unopened
+    /// project or an unknown page name is a controlled error in the returned
+    /// `Result`, never a panic.
     ///
     /// For a paginated tracked page this renders the page's PRIMARY output
     /// (`render_page("blog/") == public/blog/index.html`); arbitrary
@@ -149,8 +212,20 @@ impl Engine {
         page_name: &str,
         context: &Context,
     ) -> Result<RenderResult, RenderError> {
-        let Some(snapshot) = &self.project else {
-            return Err(RenderError::new(ErrorKind::Render, "not a Nift project"));
+        let snapshot = {
+            let slot = lock(&self.project);
+            match &slot.state {
+                Some(snapshot) => Arc::clone(snapshot),
+                None => {
+                    let open_error = slot.open_error.clone();
+                    return Err(RenderError::new(
+                        ErrorKind::Render,
+                        open_error
+                            .map(|error| error.message)
+                            .unwrap_or_else(|| "not a Nift project".to_string()),
+                    ));
+                }
+            }
         };
         let Some(tracked) = snapshot.find(page_name) else {
             return Err(RenderError::new(
@@ -169,7 +244,7 @@ impl Engine {
             identity = identity.template_path(info.template_path.clone());
         }
         let host = crate::project_host::ProjectHost::new(
-            snapshot,
+            &snapshot,
             &self.defaults,
             context,
             self.environment_provider.as_deref(),
@@ -320,4 +395,13 @@ impl<'a> RenderHost for EngineHost<'a> {
     fn output_dir(&self) -> String {
         "public/".to_string()
     }
+}
+
+/// Lock a mutex, recovering from poisoning (the "never panics on external
+/// input" rule: a poisoned lock is a panicking thread, not external input, but
+/// recovery keeps the serving contract intact).
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
