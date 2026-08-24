@@ -35,7 +35,7 @@ document records what is authoritative for that contract and what is not.
    project-root-escape).
 
 4. **The frozen documentation of what is intentionally outside v1**:
-   `build-all` CLI/build machinery, tracking mutation, `.info.json` writing,
+   `build --all` CLI/build machinery, tracking mutation, `.info.json` writing,
    watch mode, incremental builds, arbitrary pagination-page API, value
    serialization, the C ABI and ecosystem bindings.
 

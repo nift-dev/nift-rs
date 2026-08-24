@@ -110,7 +110,7 @@ Unexpected path/locale differences are NOT permitted variation (see
 
 | Feature | Authority | Disposition |
 |---|---|---|
-| `build-all`/`build-updated` CLI, incremental build machinery | contract | unsupported |
+| `build`/`build --all` CLI, incremental build machinery | contract | unsupported |
 | Tracking mutation (`save_tracking`) | contract | unsupported |
 | `.info.json` writing | contract | unsupported |
 | Watch mode / filesystem watching | contract | unsupported |
