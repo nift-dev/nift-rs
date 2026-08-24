@@ -296,257 +296,737 @@ pub fn entity(value: &str) -> Option<&'static str> {
     None
 }
 
-/// A focused JSON Schema validator (NR4) covering the reference surface used
-/// by `@json(..., schema)`: type, required, properties, items, and
-/// additionalProperties. Returns an error string with a JSON pointer-style
-/// path on failure.
+/// JSON Schema validation (NR4), mirroring the frozen C++ JsonSchema subset:
+/// the supported keyword inventory is enforced (unknown keywords are rejected)
+/// and both the schema shape and the instance are validated.
+///
+/// Supported keywords: `$schema`, `$comment`, `title`, `description`, `default`,
+/// `examples` (accepted, ignored), `$defs`, `$ref`, `type`, `enum`, `const`,
+/// `properties`, `required`, `additionalProperties`, `minProperties`,
+/// `maxProperties`, `items`, `minItems`, `maxItems`, `uniqueItems`, `contains`,
+/// `minContains`, `maxContains`, `minLength`, `maxLength`, `pattern`,
+/// `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+/// `allOf`, `anyOf`, `oneOf`, `not`.
 pub fn validate_schema(value: &Value, schema: &Value) -> Result<(), String> {
-    validate_at(value, schema, "$")
-}
-
-fn validate_at(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
-    let Some(schema_object) = schema.as_object() else {
-        return Ok(());
+    let validator = Validator {
+        root_schema: schema.clone(),
     };
-
-    if let Some(ty) = schema_object.get("type") {
-        let Some(expected) = ty.as_str() else {
-            return Err(format!("{path}: schema 'type' must be a string"));
-        };
-        let matches = match expected {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => value.is_number() && value.as_number().unwrap_or(0.0).fract() == 0.0,
-            "boolean" => value.is_bool(),
-            "null" => value.is_null(),
-            other => return Err(format!("{path}: unsupported schema type '{other}'")),
-        };
-        if !matches {
-            return Err(format!(
-                "{path}: expected {expected}, got {}",
-                json_type_name(value)
-            ));
-        }
-    }
-
-    if let Some(required) = schema_object.get("required") {
-        let Some(required_list) = required.as_array() else {
-            return Err(format!("{path}: schema 'required' must be an array"));
-        };
-        if let Some(object) = value.as_object() {
-            for requirement in required_list {
-                let Some(key) = requirement.as_str() else {
-                    return Err(format!("{path}: 'required' entries must be strings"));
-                };
-                if !object.contains_key(key) {
-                    return Err(format!("{path}: missing required property '{key}'"));
-                }
-            }
-        }
-    }
-
-    if let Some(properties) = schema_object.get("properties") {
-        let Some(properties_object) = properties.as_object() else {
-            return Err(format!("{path}: schema 'properties' must be an object"));
-        };
-        if let Some(object) = value.as_object() {
-            for (key, property_schema) in properties_object {
-                if let Some(property_value) = object.get(key) {
-                    validate_at(property_value, property_schema, &format!("{path}.{key}"))?;
-                }
-            }
-        }
-    }
-
-    if let Some(additional) = schema_object.get("additionalProperties") {
-        if let Some(object) = value.as_object() {
-            if additional == &Value::boolean(false) {
-                if let Some(properties) = schema_object.get("properties") {
-                    if let Some(properties_object) = properties.as_object() {
-                        for key in object.keys() {
-                            if !properties_object.contains_key(key) {
-                                return Err(format!("{path}: unexpected property '{key}'"));
-                            }
-                        }
-                    }
-                }
-            } else if additional.is_object() {
-                let additional_value = additional.clone();
-                if let Some(properties) = schema_object.get("properties") {
-                    if let Some(properties_object) = properties.as_object() {
-                        for (key, property_value) in object {
-                            if !properties_object.contains_key(key) {
-                                validate_at(
-                                    property_value,
-                                    &additional_value,
-                                    &format!("{path}.{key}"),
-                                )?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(count) = schema_object.get("minProperties") {
-        if let Some(object) = value.as_object() {
-            let limit = count.as_number().unwrap_or(0.0);
-            if object.len() < limit as usize {
-                return Err(format!("{path}: object has fewer than {limit} properties"));
-            }
-        }
-    }
-    if let Some(count) = schema_object.get("maxProperties") {
-        if let Some(object) = value.as_object() {
-            let limit = count.as_number().unwrap_or(0.0);
-            if object.len() > limit as usize {
-                return Err(format!("{path}: object has more than {limit} properties"));
-            }
-        }
-    }
-
-    if let Some(items) = schema_object.get("items") {
-        if let Some(array) = value.as_array() {
-            if let Some(items_object) = items.as_object() {
-                let items_value = Value::Object(items_object.clone());
-                for (index, item) in array.iter().enumerate() {
-                    validate_at(item, &items_value, &format!("{path}[{index}]"))?;
-                }
-            }
-        }
-    }
-    if let Some(count) = schema_object.get("minItems") {
-        if let Some(array) = value.as_array() {
-            let limit = count.as_number().unwrap_or(0.0);
-            if array.len() < limit as usize {
-                return Err(format!("{path}: array has fewer than {limit} items"));
-            }
-        }
-    }
-    if let Some(count) = schema_object.get("maxItems") {
-        if let Some(array) = value.as_array() {
-            let limit = count.as_number().unwrap_or(0.0);
-            if array.len() > limit as usize {
-                return Err(format!("{path}: array has more than {limit} items"));
-            }
-        }
-    }
-    if schema_object.get("uniqueItems") == Some(&Value::boolean(true)) {
-        if let Some(array) = value.as_array() {
-            let mut seen = std::collections::HashSet::new();
-            for item in array {
-                if !seen.insert(crate::expr::dump_compact(item)) {
-                    return Err(format!("{path}: array items must be unique"));
-                }
-            }
-        }
-    }
-
-    if let Some(count) = schema_object.get("minLength") {
-        if let Some(string) = value.as_str() {
-            let limit = count.as_number().unwrap_or(0.0);
-            if string.chars().count() < limit as usize {
-                return Err(format!("{path}: string is shorter than {limit} characters"));
-            }
-        }
-    }
-    if let Some(count) = schema_object.get("maxLength") {
-        if let Some(string) = value.as_str() {
-            let limit = count.as_number().unwrap_or(0.0);
-            if string.chars().count() > limit as usize {
-                return Err(format!("{path}: string is longer than {limit} characters"));
-            }
-        }
-    }
-
-    for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
-        if let Some(bound) = schema_object.get(key) {
-            if let Some(number) = value.as_number() {
-                let bound = bound.as_number().unwrap_or(f64::NAN);
-                let violation = match key {
-                    "minimum" => number < bound,
-                    "maximum" => number > bound,
-                    "exclusiveMinimum" => number <= bound,
-                    "exclusiveMaximum" => number >= bound,
-                    _ => false,
-                };
-                if violation {
-                    return Err(format!("{path}: {number} is not within {key} {bound}"));
-                }
-            }
-        }
-    }
-    if let Some(multiple) = schema_object.get("multipleOf") {
-        if let Some(number) = value.as_number() {
-            let multiple = multiple.as_number().unwrap_or(0.0);
-            if multiple != 0.0 {
-                let remainder = number / multiple;
-                if remainder.fract().abs() > 1e-9 {
-                    return Err(format!("{path}: {number} is not a multiple of {multiple}"));
-                }
-            }
-        }
-    }
-
-    if let Some(enum_list) = schema_object.get("enum") {
-        let Some(enum_array) = enum_list.as_array() else {
-            return Err(format!("{path}: schema 'enum' must be an array"));
-        };
-        if !enum_array.iter().any(|candidate| candidate == value) {
-            return Err(format!(
-                "{path}: value is not one of the allowed enum values"
-            ));
-        }
-    }
-    if let Some(const_value) = schema_object.get("const") {
-        if const_value != value {
-            return Err(format!("{path}: value does not equal the const value"));
-        }
-    }
-
-    for key in ["allOf", "anyOf", "oneOf"] {
-        if let Some(combinators) = schema_object.get(key) {
-            let Some(combinator_array) = combinators.as_array() else {
-                return Err(format!("{path}: schema '{key}' must be an array"));
-            };
-            let mut matched = 0usize;
-            for sub_schema in combinator_array {
-                if validate_at(value, sub_schema, path).is_ok() {
-                    matched += 1;
-                }
-            }
-            let ok = match key {
-                "allOf" => matched == combinator_array.len(),
-                "anyOf" => matched >= 1,
-                "oneOf" => matched == 1,
-                _ => false,
-            };
-            if !ok {
-                return Err(format!("{path}: does not satisfy '{key}'"));
-            }
-        }
-    }
-    if let Some(not_schema) = schema_object.get("not") {
-        if validate_at(value, not_schema, path).is_ok() {
-            return Err(format!("{path}: value matches the 'not' schema"));
-        }
-    }
-
+    validator.validate_schema_shape(schema, "#", 0)?;
+    validator.apply(value, schema, "$", 0)?;
     Ok(())
 }
 
-fn json_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+struct Validator {
+    root_schema: Value,
+}
+
+impl Validator {
+    const MAX_DEPTH: usize = 256;
+
+    fn type_name(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
     }
+
+    fn json_equal(a: &Value, b: &Value) -> bool {
+        a == b
+    }
+
+    fn non_negative_integer(value: &Value) -> Option<usize> {
+        let n = value.as_number()?;
+        if n < 0.0 || n.fract() != 0.0 || n > usize::MAX as f64 {
+            return None;
+        }
+        Some(n as usize)
+    }
+
+    fn validate_schema_shape(
+        &self,
+        schema: &Value,
+        schema_path: &str,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth > Self::MAX_DEPTH {
+            return Err(format!(
+                "JSON Schema nesting is too deep near {schema_path}"
+            ));
+        }
+        if schema.is_bool() {
+            return Ok(());
+        }
+        let Some(schema_object) = schema.as_object() else {
+            return Err(format!(
+                "JSON Schema at {schema_path} must be an object or boolean"
+            ));
+        };
+
+        const SUPPORTED: &[&str] = &[
+            "$schema",
+            "$comment",
+            "title",
+            "description",
+            "default",
+            "examples",
+            "$defs",
+            "$ref",
+            "type",
+            "enum",
+            "const",
+            "properties",
+            "required",
+            "additionalProperties",
+            "minProperties",
+            "maxProperties",
+            "items",
+            "minItems",
+            "maxItems",
+            "uniqueItems",
+            "contains",
+            "minContains",
+            "maxContains",
+            "minLength",
+            "maxLength",
+            "pattern",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+            "allOf",
+            "anyOf",
+            "oneOf",
+            "not",
+        ];
+        for key in schema_object.keys() {
+            if !SUPPORTED.contains(&key.as_str()) {
+                return Err(format!(
+                    "unsupported JSON Schema keyword '{key}' at {schema_path}"
+                ));
+            }
+        }
+
+        if let Some(t) = schema_object.get("type") {
+            match t {
+                Value::String(name) => {
+                    if !valid_type_name(name) {
+                        return Err(format!(
+                            "unknown JSON Schema type '{name}' at {schema_path}"
+                        ));
+                    }
+                }
+                Value::Array(list) => {
+                    if list.is_empty() {
+                        return Err(format!("type array cannot be empty at {schema_path}"));
+                    }
+                    let mut seen = std::collections::HashSet::new();
+                    for item in list {
+                        let Some(name) = item.as_str() else {
+                            return Err(format!(
+                                "type array must contain supported type names at {schema_path}"
+                            ));
+                        };
+                        if !valid_type_name(name) {
+                            return Err(format!(
+                                "type array must contain supported type names at {schema_path}"
+                            ));
+                        }
+                        if !seen.insert(name) {
+                            return Err(format!(
+                                "type array contains duplicate type '{name}' at {schema_path}"
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "type must be a string or array of strings at {schema_path}"
+                    ))
+                }
+            }
+        }
+
+        if let Some(required) = schema_object.get("required") {
+            let Some(list) = required.as_array() else {
+                return Err(format!("required must be an array at {schema_path}"));
+            };
+            let mut seen = std::collections::HashSet::new();
+            for item in list {
+                let Some(name) = item.as_str() else {
+                    return Err(format!(
+                        "required must contain only strings at {schema_path}"
+                    ));
+                };
+                if !seen.insert(name) {
+                    return Err(format!(
+                        "required contains duplicate member '{name}' at {schema_path}"
+                    ));
+                }
+            }
+        }
+
+        for key in [
+            "minProperties",
+            "maxProperties",
+            "minItems",
+            "maxItems",
+            "minContains",
+            "maxContains",
+            "minLength",
+            "maxLength",
+        ] {
+            if let Some(value) = schema_object.get(key) {
+                if Self::non_negative_integer(value).is_none() {
+                    return Err(format!(
+                        "{key} must be a non-negative integer at {schema_path}"
+                    ));
+                }
+            }
+        }
+        for key in [
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+        ] {
+            if let Some(value) = schema_object.get(key) {
+                if !value.is_number() {
+                    return Err(format!("{key} must be a number at {schema_path}"));
+                }
+            }
+        }
+        if let Some(multiple) = schema_object.get("multipleOf") {
+            if multiple.as_number().unwrap_or(0.0) <= 0.0 {
+                return Err(format!(
+                    "multipleOf must be greater than zero at {schema_path}"
+                ));
+            }
+        }
+        if let Some(pattern) = schema_object.get("pattern") {
+            let Some(pattern_text) = pattern.as_str() else {
+                return Err(format!("pattern must be a string at {schema_path}"));
+            };
+            if regex::Regex::new(pattern_text).is_err() {
+                return Err(format!(
+                    "pattern is not a valid regular expression at {schema_path}"
+                ));
+            }
+        }
+        if schema_object.get("uniqueItems") == Some(&Value::boolean(true)) {
+        } else if schema_object.contains_key("uniqueItems") {
+            return Err(format!("uniqueItems must be boolean at {schema_path}"));
+        }
+        if let Some(additional) = schema_object.get("additionalProperties") {
+            if !additional.is_bool() && !additional.is_object() {
+                return Err(format!(
+                    "additionalProperties must be a boolean or schema object at {schema_path}"
+                ));
+            }
+        }
+        if schema_object.contains_key("properties") && !schema_object["properties"].is_object() {
+            return Err(format!("properties must be an object at {schema_path}"));
+        }
+        if schema_object.contains_key("$defs") && !schema_object["$defs"].is_object() {
+            return Err(format!("$defs must be an object at {schema_path}"));
+        }
+        if schema_object.contains_key("$ref") && !schema_object["$ref"].is_string() {
+            return Err(format!("$ref must be a string at {schema_path}"));
+        }
+        if let Some(enum_list) = schema_object.get("enum") {
+            if !enum_list.is_array() || enum_list.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                return Err(format!("enum must be a non-empty array at {schema_path}"));
+            }
+        }
+        for key in ["allOf", "anyOf", "oneOf"] {
+            if let Some(list) = schema_object.get(key) {
+                let Some(array) = list.as_array() else {
+                    return Err(format!(
+                        "{key} must be a non-empty array of schemas at {schema_path}"
+                    ));
+                };
+                if array.is_empty() {
+                    return Err(format!(
+                        "{key} must be a non-empty array of schemas at {schema_path}"
+                    ));
+                }
+                for (index, child) in array.iter().enumerate() {
+                    self.validate_schema_shape(
+                        child,
+                        &format!("{schema_path}/{key}/{index}"),
+                        depth + 1,
+                    )?;
+                }
+            }
+        }
+        for key in ["items", "contains", "not"] {
+            if let Some(child) = schema_object.get(key) {
+                self.validate_schema_shape(child, &format!("{schema_path}/{key}"), depth + 1)?;
+            }
+        }
+        if let Some(additional) = schema_object.get("additionalProperties") {
+            if additional.is_object() {
+                self.validate_schema_shape(
+                    additional,
+                    &format!("{schema_path}/additionalProperties"),
+                    depth + 1,
+                )?;
+            }
+        }
+        if let Some(properties) = schema_object.get("properties") {
+            if let Some(object) = properties.as_object() {
+                for (key, child) in object {
+                    self.validate_schema_shape(
+                        child,
+                        &format!("{schema_path}/properties/{key}"),
+                        depth + 1,
+                    )?;
+                }
+            }
+        }
+        if let Some(defs) = schema_object.get("$defs") {
+            if let Some(object) = defs.as_object() {
+                for (key, child) in object {
+                    self.validate_schema_shape(
+                        child,
+                        &format!("{schema_path}/$defs/{key}"),
+                        depth + 1,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply(
+        &self,
+        instance: &Value,
+        schema: &Value,
+        instance_path: &str,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth > Self::MAX_DEPTH {
+            return Err(format!(
+                "at {instance_path}: JSON Schema validation exceeded maximum nesting depth"
+            ));
+        }
+        if schema.is_bool() {
+            if schema == &Value::boolean(true) {
+                return Ok(());
+            }
+            return Err(format!(
+                "at {instance_path}: value is rejected by a false schema"
+            ));
+        }
+        let Some(schema_object) = schema.as_object() else {
+            return Err(format!(
+                "at {instance_path}: internal schema is not an object or boolean"
+            ));
+        };
+
+        if let Some(ref_value) = schema_object.get("$ref") {
+            let ref_text = ref_value.as_str().unwrap_or("");
+            let target = resolve_local_ref(&self.root_schema, ref_text)?;
+            self.apply(instance, &target, instance_path, depth + 1)?;
+        }
+
+        if let Some(t) = schema_object.get("type") {
+            let match_type = |expected: &str| -> bool {
+                match expected {
+                    "null" => instance.is_null(),
+                    "boolean" => instance.is_bool(),
+                    "number" => instance.is_number(),
+                    "integer" => {
+                        instance.is_number() && instance.as_number().unwrap_or(0.0).fract() == 0.0
+                    }
+                    "string" => instance.is_string(),
+                    "array" => instance.is_array(),
+                    "object" => instance.is_object(),
+                    _ => false,
+                }
+            };
+            let matched = match t {
+                Value::String(name) => match_type(name),
+                Value::Array(list) => list
+                    .iter()
+                    .any(|item| match_type(item.as_str().unwrap_or(""))),
+                _ => false,
+            };
+            if !matched {
+                let expected = match t {
+                    Value::String(name) => name.clone(),
+                    Value::Array(list) => list
+                        .iter()
+                        .map(|item| item.as_str().unwrap_or("").to_string())
+                        .collect::<Vec<_>>()
+                        .join(" or "),
+                    _ => "?".to_string(),
+                };
+                return Err(format!(
+                    "at {instance_path}: expected {expected}, received {}",
+                    Self::type_name(instance)
+                ));
+            }
+        }
+
+        if let Some(const_value) = schema_object.get("const") {
+            if const_value != instance {
+                return Err(format!("at {instance_path}: value does not match const"));
+            }
+        }
+        if let Some(enum_list) = schema_object.get("enum") {
+            let found = enum_list
+                .as_array()
+                .map(|list| list.iter().any(|candidate| candidate == instance))
+                .unwrap_or(false);
+            if !found {
+                return Err(format!(
+                    "at {instance_path}: value is not one of the allowed enum values"
+                ));
+            }
+        }
+
+        if instance.is_object() {
+            let object = instance.as_object().unwrap();
+            if let Some(min) = schema_object.get("minProperties") {
+                if object.len() < Self::non_negative_integer(min).unwrap_or(0) {
+                    return Err(format!(
+                        "at {instance_path}: object has fewer than {} properties",
+                        Self::non_negative_integer(min).unwrap_or(0)
+                    ));
+                }
+            }
+            if let Some(max) = schema_object.get("maxProperties") {
+                if object.len() > Self::non_negative_integer(max).unwrap_or(0) {
+                    return Err(format!(
+                        "at {instance_path}: object has more than {} properties",
+                        Self::non_negative_integer(max).unwrap_or(0)
+                    ));
+                }
+            }
+            if let Some(required) = schema_object.get("required") {
+                if let Some(list) = required.as_array() {
+                    for requirement in list {
+                        let name = requirement.as_str().unwrap_or("");
+                        if !object.contains_key(name) {
+                            return Err(format!(
+                                "at {instance_path}: required property '{name}' is missing"
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(properties) = schema_object.get("properties") {
+                if let Some(properties_object) = properties.as_object() {
+                    for (key, child_schema) in properties_object {
+                        if let Some(property_value) = object.get(key) {
+                            self.apply(
+                                property_value,
+                                child_schema,
+                                &format!("{instance_path}.{key}"),
+                                depth + 1,
+                            )?;
+                        }
+                    }
+                }
+            }
+            if let Some(additional) = schema_object.get("additionalProperties") {
+                let declared = schema_object
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .map(|p| p.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for (key, value) in object {
+                    if declared.contains(key) {
+                        continue;
+                    }
+                    if additional.is_bool() {
+                        if additional != &Value::boolean(true) {
+                            return Err(format!(
+                                "at {instance_path}.{key}: additional property is not allowed"
+                            ));
+                        }
+                    } else {
+                        self.apply(
+                            value,
+                            additional,
+                            &format!("{instance_path}.{key}"),
+                            depth + 1,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        if instance.is_array() {
+            let array = instance.as_array().unwrap();
+            if let Some(min) = schema_object.get("minItems") {
+                if array.len() < Self::non_negative_integer(min).unwrap_or(0) {
+                    return Err(format!(
+                        "at {instance_path}: array has fewer than {} items",
+                        Self::non_negative_integer(min).unwrap_or(0)
+                    ));
+                }
+            }
+            if let Some(max) = schema_object.get("maxItems") {
+                if array.len() > Self::non_negative_integer(max).unwrap_or(0) {
+                    return Err(format!(
+                        "at {instance_path}: array has more than {} items",
+                        Self::non_negative_integer(max).unwrap_or(0)
+                    ));
+                }
+            }
+            if schema_object.get("uniqueItems") == Some(&Value::boolean(true)) {
+                for i in 0..array.len() {
+                    for j in (i + 1)..array.len() {
+                        if Self::json_equal(&array[i], &array[j]) {
+                            return Err(format!(
+                                "at {instance_path}[{j}]: array items must be unique"
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(items) = schema_object.get("items") {
+                for (index, item) in array.iter().enumerate() {
+                    self.apply(item, items, &format!("{instance_path}[{index}]"), depth + 1)?;
+                }
+            }
+            if let Some(contains) = schema_object.get("contains") {
+                let mut matches = 0usize;
+                for item in array {
+                    if self.apply(item, contains, instance_path, depth + 1).is_ok() {
+                        matches += 1;
+                    }
+                }
+                let min = schema_object
+                    .get("minContains")
+                    .and_then(Self::non_negative_integer)
+                    .unwrap_or(1);
+                let max = schema_object
+                    .get("maxContains")
+                    .and_then(Self::non_negative_integer)
+                    .unwrap_or(usize::MAX);
+                if matches < min || matches > max {
+                    let max_text = if max == usize::MAX {
+                        "unbounded".to_string()
+                    } else {
+                        max.to_string()
+                    };
+                    return Err(format!(
+                        "at {instance_path}: array contains {matches} matching items; expected between {min} and {max_text}"
+                    ));
+                }
+            }
+        }
+
+        if let Some(string) = instance.as_str() {
+            let length = string.chars().count();
+            if let Some(min) = schema_object.get("minLength") {
+                if length < Self::non_negative_integer(min).unwrap_or(0) {
+                    return Err(format!(
+                        "at {instance_path}: string is shorter than minLength"
+                    ));
+                }
+            }
+            if let Some(max) = schema_object.get("maxLength") {
+                if length > Self::non_negative_integer(max).unwrap_or(0) {
+                    return Err(format!(
+                        "at {instance_path}: string is longer than maxLength"
+                    ));
+                }
+            }
+            if let Some(pattern) = schema_object.get("pattern") {
+                let pattern_text = pattern.as_str().unwrap_or("");
+                let compiled = regex::Regex::new(pattern_text)
+                    .map_err(|_| "invalid regex pattern in schema".to_string())?;
+                if !compiled.is_match(string) {
+                    return Err(format!(
+                        "at {instance_path}: string does not match required pattern"
+                    ));
+                }
+            }
+        }
+
+        if let Some(number) = instance.as_number() {
+            if let Some(bound) = schema_object.get("minimum") {
+                if number < bound.as_number().unwrap_or(0.0) {
+                    return Err(format!("at {instance_path}: number is less than minimum"));
+                }
+            }
+            if let Some(bound) = schema_object.get("maximum") {
+                if number > bound.as_number().unwrap_or(0.0) {
+                    return Err(format!(
+                        "at {instance_path}: number is greater than maximum"
+                    ));
+                }
+            }
+            if let Some(bound) = schema_object.get("exclusiveMinimum") {
+                if number <= bound.as_number().unwrap_or(0.0) {
+                    return Err(format!(
+                        "at {instance_path}: number is not greater than exclusiveMinimum"
+                    ));
+                }
+            }
+            if let Some(bound) = schema_object.get("exclusiveMaximum") {
+                if number >= bound.as_number().unwrap_or(0.0) {
+                    return Err(format!(
+                        "at {instance_path}: number is not less than exclusiveMaximum"
+                    ));
+                }
+            }
+            if let Some(multiple) = schema_object.get("multipleOf") {
+                let divisor = multiple.as_number().unwrap_or(0.0);
+                if divisor != 0.0 {
+                    let quotient = number / divisor;
+                    if (quotient - quotient.round()).abs() > 1e-10 * quotient.abs().max(1.0) {
+                        return Err(format!(
+                            "at {instance_path}: number is not a multipleOf {}",
+                            multiple.as_number().unwrap_or(0.0)
+                        ));
+                    }
+                }
+            }
+        }
+
+        let count_matches = |self_ref: &Self, list: &Value| -> usize {
+            list.as_array()
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter(|child| {
+                            self_ref
+                                .apply(instance, child, instance_path, depth + 1)
+                                .is_ok()
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        if let Some(all_of) = schema_object.get("allOf") {
+            if let Some(list) = all_of.as_array() {
+                for child in list {
+                    self.apply(instance, child, instance_path, depth + 1)?;
+                }
+            }
+        }
+        if let Some(any_of) = schema_object.get("anyOf") {
+            if count_matches(self, any_of) == 0 {
+                return Err(format!(
+                    "at {instance_path}: value does not match any schema in anyOf"
+                ));
+            }
+        }
+        if let Some(one_of) = schema_object.get("oneOf") {
+            if count_matches(self, one_of) != 1 {
+                return Err(format!(
+                    "at {instance_path}: value must match exactly one schema in oneOf"
+                ));
+            }
+        }
+        if let Some(not) = schema_object.get("not") {
+            if self.apply(instance, not, instance_path, depth + 1).is_ok() {
+                return Err(format!(
+                    "at {instance_path}: value matches schema forbidden by not"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn valid_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "null" | "boolean" | "number" | "integer" | "string" | "array" | "object"
+    )
+}
+
+fn pointer_unescape(token: &str) -> Option<String> {
+    let mut out = String::new();
+    let bytes = token.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'~' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            return None;
+        }
+        let next = bytes[i + 1];
+        if next == b'0' {
+            out.push('~');
+        } else if next == b'1' {
+            out.push('/');
+        } else {
+            return None;
+        }
+        i += 2;
+    }
+    Some(out)
+}
+
+fn resolve_local_ref(root: &Value, reference: &str) -> Result<Value, String> {
+    if reference == "#" {
+        return Ok(root.clone());
+    }
+    if !reference.starts_with("#/") {
+        return Err(format!(
+            "only local JSON Schema $ref values beginning with '#/' are supported (got '{reference}')"
+        ));
+    }
+    let mut current = root.clone();
+    let mut start = 2;
+    loop {
+        let slash = reference[start..].find('/').map(|o| start + o);
+        let end = slash.unwrap_or(reference.len());
+        let token = &reference[start..end];
+        let Some(token) = pointer_unescape(token) else {
+            return Err(format!("invalid JSON Pointer escape in $ref '{reference}'"));
+        };
+        match &current {
+            Value::Object(object) => {
+                let Some(child) = object.get(&token) else {
+                    return Err(format!(
+                        "$ref '{reference}' does not resolve (missing member '{token}')"
+                    ));
+                };
+                current = child.clone();
+            }
+            Value::Array(array) => {
+                if token.is_empty() || !token.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(format!(
+                        "$ref '{reference}' uses a non-numeric array index '{token}'"
+                    ));
+                }
+                let index = token
+                    .parse::<usize>()
+                    .map_err(|_| format!("$ref array index is out of range in '{reference}'"))?;
+                let Some(child) = array.get(index) else {
+                    return Err(format!("$ref array index is out of range in '{reference}'"));
+                };
+                current = child.clone();
+            }
+            _ => {
+                return Err(format!(
+                    "$ref '{reference}' traverses through a non-container value"
+                ));
+            }
+        }
+        match slash {
+            None => break,
+            Some(slash) => start = slash + 1,
+        }
+    }
+    Ok(current)
 }
 
 #[cfg(test)]

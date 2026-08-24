@@ -42,9 +42,9 @@ pub fn with_bindings<T>(
 }
 
 /// Resolve a JSON value path: host binding, then scoped bindings, then
-/// navigation. `Ok(None)` means unresolvable (no binding, missing member or
-/// out-of-range element); a hard type error (member/element access on the
-/// wrong value type) is an `Err`.
+/// contract, then navigation. `Ok(None)` means an unresolvable ROOT (no
+/// binding, no contract); a known root with a missing member or an out-of-range
+/// element is a hard `Err` (reference navigation semantics).
 pub fn resolve_json_value(
     bindings: &JsonBindings,
     host: &dyn RenderHost,
