@@ -24,6 +24,7 @@
 
 pub mod bindings;
 pub mod context;
+pub mod engine;
 pub mod error;
 pub mod expr;
 pub mod host;
@@ -35,6 +36,7 @@ pub mod value;
 
 pub use bindings::{resolve, structural_builtin_name, valid_binding_identifier, Bindings};
 pub use context::Context;
+pub use engine::Engine;
 pub use error::{BindingError, ErrorKind, RenderError};
 pub use host::{RenderHost, RenderIdentity};
 pub use hosts::{FilesystemHost, InMemoryHost};
