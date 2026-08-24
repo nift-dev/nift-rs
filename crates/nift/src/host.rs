@@ -112,4 +112,50 @@ pub trait RenderHost {
         let _ = name;
         None
     }
+
+    /// Whether a render currently has an output location (NR5). Standalone
+    /// hosts with real output geometry report true; a project-aware host
+    /// always does. @pathto requires this.
+    fn has_output_context(&self) -> bool {
+        true
+    }
+
+    /// The generated output directory relative to the root (the 404 rule's web
+    /// root). Defaults to "public/".
+    fn output_dir(&self) -> String {
+        "public/".to_string()
+    }
+
+    /// The generated output path of a tracked page name (NR5 host capability;
+    /// real tracked pages arrive at NR8). `None` for a name that is not a
+    /// tracked page, in which case @pathto treats it as a concrete project
+    /// path. Returns the output path and whether the target is an index page.
+    fn tracked_output_path(&self, name: &str) -> Option<(PathBuf, bool)> {
+        let _ = name;
+        None
+    }
+
+    /// The generated output path of pagination page `page` (NR5 host
+    /// capability; pagination context is NR8). Page 1 is the primary output.
+    fn pagination_output_path(&self, identity: &RenderIdentity, page: usize) -> PathBuf {
+        if page <= 1 {
+            self.output_path(identity)
+        } else {
+            let primary = self.output_path(identity);
+            let parent = primary.parent().unwrap_or(&primary);
+            parent.join(format!(
+                "{}-{}{}",
+                primary
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("page"),
+                page,
+                primary
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| format!(".{e}"))
+                    .unwrap_or_default()
+            ))
+        }
+    }
 }

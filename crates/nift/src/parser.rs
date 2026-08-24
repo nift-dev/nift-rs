@@ -67,7 +67,6 @@ pub fn render(
 }
 
 /// Per-render mutable state that persists across recursive parses.
-#[derive(Default)]
 struct RenderState {
     content_count: usize,
     html_comment_depth: usize,
@@ -79,10 +78,35 @@ struct RenderState {
     /// Names bound by @json within the current control-block scope stack.
     /// Pop of a scope erases those bindings (reference json_binding_scopes_).
     json_binding_scopes: Vec<Vec<String>>,
+    /// Pagination context (NR5 parse surface; active pagination is NR8).
+    pagination_current: usize,
+    pagination_total: usize,
+    pagination_context_active: bool,
+    pagination_current_output: Option<PathBuf>,
     /// Dependency spellings discovered during rendering (root-relative).
     dependencies: std::collections::BTreeSet<String>,
     /// Requirement spellings discovered during rendering (root-relative).
     requirements: std::collections::BTreeSet<String>,
+}
+
+impl Default for RenderState {
+    fn default() -> Self {
+        Self {
+            content_count: 0,
+            html_comment_depth: 0,
+            code_block_depth: 0,
+            input_stack: Vec::new(),
+            json_bindings: crate::expr::JsonBindings::new(),
+            json_binding_scopes: Vec::new(),
+            // The reference defaults the pagination window to page 1 of 1.
+            pagination_current: 1,
+            pagination_total: 1,
+            pagination_context_active: false,
+            pagination_current_output: None,
+            dependencies: std::collections::BTreeSet::new(),
+            requirements: std::collections::BTreeSet::new(),
+        }
+    }
 }
 
 /// Parse a control-block body under a fresh @json-binding scope, erasing
@@ -1245,6 +1269,105 @@ fn parse(
                 continue;
             }
 
+            if function == "pathto" || function == "pathtofile" {
+                if !has_parameters || parameters_count != 1 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        format!("@{function} expects exactly one path/name"),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let resolved = interpolate_parameter(state, host, identity, &parameters[0])
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                if host.tracked_output_path(&resolved).is_none() {
+                    let target_path = lexically_normal(&host.root().join(&resolved));
+                    if !path_within(host.root(), &target_path) {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!(
+                                "@{function} path must stay inside the Nift project: {resolved}"
+                            ),
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                }
+                let path_string = path_to(host, identity, &resolved)
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                output += &path_string;
+                let requirement = match host.tracked_output_path(&resolved) {
+                    Some((path, _)) => path,
+                    None => lexically_normal(&host.root().join(&resolved)),
+                };
+                state.requirements.insert(host.relative(&requirement));
+                i = end;
+                continue;
+            }
+
+            if function == "pathtopage" {
+                if !has_parameters || parameters_count != 1 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "pathtopage: expected 1 page number",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let raw = parameters[0].trim();
+                let relative = raw.starts_with('+') || raw.starts_with('-');
+                let sign: i64 = if raw.starts_with('-') { -1 } else { 1 };
+                let page_arg = if relative && raw.len() > 1 {
+                    &raw[1..]
+                } else {
+                    raw
+                };
+                let resolved = interpolate_parameter(state, host, identity, page_arg)
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                let trimmed = resolved.trim();
+                let number: u64 = trimmed.parse().map_err(|_| {
+                    error_at(
+                        ErrorKind::Parse,
+                        "pathtopage: page/offset must be a positive integer",
+                        text,
+                        i,
+                        source_path,
+                    )
+                })?;
+                if number == 0 {
+                    return Err(error_at(
+                        ErrorKind::Parse,
+                        "pathtopage: page/offset must be a positive integer",
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                let mut page: i64 = number as i64;
+                if relative {
+                    page = state.pagination_current as i64 + sign * (number as i64);
+                }
+                if page < 1 || (page as u64) > state.pagination_total as u64 {
+                    return Err(error_at(
+                        ErrorKind::Render,
+                        format!(
+                            "pathtopage: resolved page must be between 1 and {}",
+                            state.pagination_total
+                        ),
+                        text,
+                        i,
+                        source_path,
+                    ));
+                }
+                output += &path_to_page(state, host, identity, page as usize)
+                    .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+                i = end;
+                continue;
+            }
+
             if function == "getenv" {
                 if !has_parameters || parameters_count != 1 {
                     return Err(error_at(
@@ -1680,6 +1803,164 @@ pub(crate) fn truthy(value: &Value) -> bool {
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
     }
+}
+
+/// Path spelled with forward slashes (reference generic_string).
+fn generic(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// The path/URL emitted by @pathto/@pathtofile (reference `path_to`): current
+/// output base, tracked or concrete destination, 404 root-absolute rule,
+/// index-page geometry and `./` prefixing.
+fn path_to(
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    argument: &str,
+) -> Result<String, RenderError> {
+    if !host.has_output_context() {
+        return Err(RenderError::new(
+            ErrorKind::Render,
+            format!(
+                "@pathto requires a path context; set the current output on the render context to resolve '{argument}'"
+            ),
+        ));
+    }
+    let output = host.output_path(identity);
+    let base = output.parent().unwrap_or(&output).to_path_buf();
+    let absolute_404 = identity.name.as_deref() == Some("404");
+
+    let (destination, index_page) = match host.tracked_output_path(argument) {
+        Some((path, index)) => (path, index),
+        None => {
+            let destination = lexically_normal(&host.root().join(argument));
+            if !path_within(host.root(), &destination) {
+                return Err(RenderError::new(
+                    ErrorKind::Render,
+                    format!("pathto: path must stay inside the Nift project: {argument}"),
+                ));
+            }
+            if !host.source_exists(&destination) {
+                return Err(RenderError::new(
+                    ErrorKind::Render,
+                    format!("'{argument}' is neither a tracked name nor a file that exists"),
+                ));
+            }
+            (destination, false)
+        }
+    };
+
+    if absolute_404 {
+        let web_root = lexically_normal(&host.root().join(host.output_dir()));
+        let web_rel = generic(&lexically_relative(&destination, &web_root));
+        let escapes = web_rel == ".." || web_rel.starts_with("../");
+        if !escapes {
+            if index_page {
+                let dir = destination.parent().unwrap_or(&destination).to_path_buf();
+                let dir_rel = generic(&lexically_relative(&dir, &web_root));
+                if dir_rel.is_empty() || dir_rel == "." {
+                    return Ok("/".to_string());
+                }
+                let mut path = format!("/{dir_rel}");
+                if !path.ends_with('/') {
+                    path.push('/');
+                }
+                return Ok(path);
+            }
+            return Ok(format!("/{web_rel}"));
+        }
+    }
+
+    let mut relative = generic(&lexically_relative(&destination, &base));
+    if relative.is_empty() {
+        relative = generic(&destination);
+    }
+    if index_page
+        && destination
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("index"))
+            .unwrap_or(false)
+    {
+        let parent = destination.parent().unwrap_or(&destination).to_path_buf();
+        let mut relative = generic(&lexically_relative(&parent, &base));
+        if relative.is_empty() {
+            relative = generic(&parent);
+        }
+        if relative.is_empty() || relative == "." {
+            return Ok("./".to_string());
+        }
+        if !relative.ends_with('/') {
+            relative.push('/');
+        }
+        return Ok(relative);
+    }
+    if !relative.contains('/') && !relative.starts_with("..") {
+        return Ok(format!("./{relative}"));
+    }
+    Ok(relative)
+}
+
+/// The path emitted by @pathtopage (reference `path_to_page`). Requires an
+/// active pagination context (NR8); the NR5 guard reports it otherwise.
+fn path_to_page(
+    state: &RenderState,
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    page: usize,
+) -> Result<String, RenderError> {
+    if !state.pagination_context_active {
+        return Err(RenderError::new(
+            ErrorKind::Render,
+            "pathtopage: only available while rendering pagination",
+        ));
+    }
+    if page < 1 || page > state.pagination_total {
+        return Err(RenderError::new(
+            ErrorKind::Render,
+            format!(
+                "pathtopage: page must be between 1 and {}",
+                state.pagination_total
+            ),
+        ));
+    }
+    let destination = host.pagination_output_path(identity, page);
+    let base = match &state.pagination_current_output {
+        Some(out) => out.parent().unwrap_or(out).to_path_buf(),
+        None => {
+            let output = host.output_path(identity);
+            output.parent().unwrap_or(&output).to_path_buf()
+        }
+    };
+    if page == 1
+        && (identity.name.as_deref() == Some("/")
+            || identity
+                .name
+                .as_deref()
+                .map(|n| n.ends_with('/'))
+                .unwrap_or(false))
+    {
+        let parent = destination.parent().unwrap_or(&destination).to_path_buf();
+        let mut relative = generic(&lexically_relative(&parent, &base));
+        if relative.is_empty() {
+            relative = generic(&parent);
+        }
+        if relative.is_empty() || relative == "." {
+            return Ok("./".to_string());
+        }
+        if !relative.ends_with('/') {
+            relative.push('/');
+        }
+        return Ok(relative);
+    }
+    let mut relative = generic(&lexically_relative(&destination, &base));
+    if relative.is_empty() {
+        relative = generic(&destination);
+    }
+    if !relative.contains('/') && !relative.starts_with("..") {
+        return Ok(format!("./{relative}"));
+    }
+    Ok(relative)
 }
 
 fn resolve_source(
