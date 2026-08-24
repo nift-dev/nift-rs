@@ -127,15 +127,11 @@ fn atomic_rename_publication_is_a_single_file_operation() {
 
 #[test]
 fn dotdot_and_dot_spellings_in_tracked_names_are_rejected() {
-    // Tracked-name validation is lexical and platform-neutral: `..`, absolute
-    // spellings and backslash-parent spellings are rejected on every OS.
+    // Tracked-name validation is lexical and platform-neutral for `..` parent
+    // components (forward or backslash): those are rejected on every OS.
     let root = fixture("name-hostility");
     write_file(&root.join(".nift/config.json"), KCONFIG);
-    for (name, expected_class) in [
-        ("../escape", "invalid-tracking-json"),
-        ("/abs", "invalid-tracking-json"),
-        ("..\\escape", "invalid-tracking-json"),
-    ] {
+    for name in ["../escape", "..\\escape"] {
         let case_root = root.join(name.replace(['/', '\\'], "_"));
         std::fs::create_dir_all(case_root.join(".nift")).unwrap();
         write_file(&case_root.join(".nift/config.json"), KCONFIG);
@@ -146,7 +142,31 @@ fn dotdot_and_dot_spellings_in_tracked_names_are_rejected() {
         let error = Engine::open(&case_root)
             .err()
             .expect("expected rejection for tracked name");
-        assert_eq!(error.kind.corpus_class(), expected_class, "name '{name}'");
+        assert_eq!(
+            error.kind.corpus_class(),
+            "invalid-tracking-json",
+            "name '{name}'"
+        );
+    }
+
+    // A leading-slash spelling is absolute (and therefore rejected) only where
+    // the platform treats it as absolute: POSIX. On Windows a bare "/abs" has
+    // no drive prefix, so std::filesystem and Rust both report it as NOT
+    // absolute and the tracked name is accepted -- the two implementations
+    // agree on each platform.
+    #[cfg(not(windows))]
+    {
+        let case_root = root.join("abs-posix");
+        std::fs::create_dir_all(case_root.join(".nift")).unwrap();
+        write_file(&case_root.join(".nift/config.json"), KCONFIG);
+        write_file(
+            &case_root.join(".nift/tracked.json"),
+            &tracked(r#"{"name":"/abs","title":"X"}"#),
+        );
+        let error = Engine::open(&case_root)
+            .err()
+            .expect("expected rejection for the absolute tracked name on POSIX");
+        assert_eq!(error.kind.corpus_class(), "invalid-tracking-json");
     }
 }
 
