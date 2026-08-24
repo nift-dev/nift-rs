@@ -392,7 +392,9 @@ pub fn evaluate_expression(
             if parens == 0 && text[i..].starts_with(op) {
                 return Some(i);
             }
-            i += 1;
+            // Advance by a full UTF-8 character: a byte-wise step lands mid-char
+            // on multi-byte text and panics on the next text[i..] slice.
+            i += text[i..].chars().next().unwrap().len_utf8();
         }
         None
     }
@@ -779,7 +781,9 @@ pub fn find_top_level(text: &str, needle: &str) -> Option<usize> {
         if parens == 0 && brackets == 0 && braces == 0 && text[i..].starts_with(needle) {
             return Some(i);
         }
-        i += 1;
+        // Advance by a full UTF-8 character: a byte-wise step lands mid-char on
+        // multi-byte text and panics on the next text[i..] slice.
+        i += text[i..].chars().next().unwrap().len_utf8();
     }
     None
 }

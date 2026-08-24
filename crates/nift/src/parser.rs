@@ -28,7 +28,15 @@ use crate::value::Value;
 use std::path::{Component, Path, PathBuf};
 
 /// Maximum template parse depth before recursion is rejected.
-const MAX_PARSE_DEPTH: usize = 64;
+///
+/// NR11 hardening: the parser's frame is large (a single ~2000-line directive
+/// function), and the guard must fit the smallest common thread stack (1 MiB,
+/// the Windows default). Probed on a 1 MiB stack: `@if` nesting overflows
+/// around depth 22, so 12 leaves comfortable margin for the outer render
+/// frames and other recursion paths. The reference's 64 is not a semantic
+/// contract; deep nesting is a safety limit, and no canonical template nests
+/// more than a handful of levels.
+const MAX_PARSE_DEPTH: usize = 12;
 
 /// The marker emitted by `@paginate`, replaced by the rendered pagination
 /// template when the primary page is assembled (reference `\x1dNIFT_PAGINATE\x1d`).
