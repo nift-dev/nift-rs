@@ -389,16 +389,66 @@ fn invalid_state_parity() {
 }
 
 #[test]
-fn invalid_state_duplicate_path_class() {
-    // Two entries resolving to the same content path are the duplicate class.
-    let root = fixture("invalid-duplicate-path");
+fn duplicate_literal_name_is_duplicate_class() {
+    let root = fixture("invalid-duplicate-literal");
     write_file(&root.join(".nift/config.json"), KCONFIG);
     write_file(
         &root.join(".nift/tracked.json"),
-        r#"{"tracked":[{"name":"/","title":"A"},{"name":"index","title":"B"}]}"#,
+        r#"{"tracked":[{"name":"about","title":"A"},{"name":"about","title":"B"}]}"#,
     );
     let error = ProjectState::open(&root).unwrap_err();
     assert_eq!(error.kind, ProjectErrorKind::DuplicateName);
+    assert_eq!(error.kind.corpus_class(), "duplicate-tracked-name");
+}
+
+fn collision_fixture(name: &str, tracked: &str) -> ProjectErrorKind {
+    let root = fixture(name);
+    write_file(&root.join(".nift/config.json"), KCONFIG);
+    write_file(&root.join(".nift/tracked.json"), tracked);
+    let error = ProjectState::open(&root).unwrap_err();
+    assert_eq!(error.kind.corpus_class(), "invalid-tracking-json");
+    error.kind
+}
+
+#[test]
+fn resolved_content_path_collision_is_not_duplicate_class() {
+    // "/" and "index" both resolve to content/index.html and public/index.html:
+    // distinct tracked names, same resolved paths -> ordinary invalid tracking,
+    // NOT duplicate-tracked-name.
+    let kind = collision_fixture(
+        "collision-both",
+        r#"{"tracked":[{"name":"/","title":"A"},{"name":"index","title":"B"}]}"#,
+    );
+    assert_eq!(kind, ProjectErrorKind::PathCollision);
+    assert_ne!(kind, ProjectErrorKind::DuplicateName);
+}
+
+#[test]
+fn resolved_content_path_collision_only() {
+    // "a/" maps to a/index; "a/index" is its own mapped name. With different
+    // output extensions the content paths collide while the outputs differ.
+    let kind = collision_fixture(
+        "collision-content",
+        r#"{"tracked":[
+            {"name":"a/","title":"A","output-ext":".html"},
+            {"name":"a/index","title":"B","output-ext":".txt"}]}"#,
+    );
+    assert_eq!(kind, ProjectErrorKind::PathCollision);
+    assert_ne!(kind, ProjectErrorKind::DuplicateName);
+}
+
+#[test]
+fn resolved_output_path_collision_only() {
+    // With different content extensions the content paths differ while both
+    // resolve to public/a/index.html.
+    let kind = collision_fixture(
+        "collision-output",
+        r#"{"tracked":[
+            {"name":"a/","title":"A","content-ext":".html"},
+            {"name":"a/index","title":"B","content-ext":".txt"}]}"#,
+    );
+    assert_eq!(kind, ProjectErrorKind::PathCollision);
+    assert_ne!(kind, ProjectErrorKind::DuplicateName);
 }
 
 #[test]
@@ -608,6 +658,67 @@ fn root_normalization_and_relative_root() {
     let relative_root = path_relative_to(&std::env::current_dir().unwrap(), &root);
     let state = ProjectState::open(&relative_root).unwrap();
     assert_eq!(state.root(), &root);
+}
+
+#[test]
+fn relative_generic_spelling() {
+    let root = fixture("relative-spelling");
+    write_valid_project(&root);
+    let state = ProjectState::open(&root).unwrap();
+
+    // Nested relative path uses generic `/` spelling.
+    assert_eq!(
+        state.relative(&root.join("content/blog/index.html")),
+        "content/blog/index.html"
+    );
+
+    // Root-equal fallback returns the normalized absolute generic path, not ".".
+    let expected_root = state.root().to_string_lossy().replace('\\', "/");
+    assert_eq!(state.relative(state.root()), expected_root);
+
+    // Outside-root spelling is the lexical `..` form.
+    assert_eq!(
+        state.relative(&root.join("..").join("outside.html")),
+        "../outside.html"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_preserves_literal_backslash_in_filename() {
+    // On POSIX a backslash is an ordinary filename character: C++
+    // generic_string() does not reinterpret it, so it must survive spelling.
+    let root = fixture("relative-backslash");
+    write_file(
+        &root.join(".nift/config.json"),
+        r#"{"config":{"content-dir":"content/"}}"#,
+    );
+    write_file(&root.join(".nift/tracked.json"), KTRACKED);
+    write_file(&root.join("content/back\\slash.html"), "<p>x</p>");
+    let state = ProjectState::open(&root).unwrap();
+    assert_eq!(
+        state.relative(&root.join("content/back\\slash.html")),
+        "content/back\\slash.html"
+    );
+    // The shared source read key must keep the same spelling and hit the cache.
+    assert_eq!(
+        &*state
+            .read_shared_source(&root.join("content/back\\slash.html"))
+            .unwrap(),
+        "<p>x</p>"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn relative_uses_forward_slashes_on_windows() {
+    let root = fixture("relative-windows");
+    write_valid_project(&root);
+    let state = ProjectState::open(&root).unwrap();
+    // Native PathBuf spelling is `\`-separated; generic spelling must be `/`.
+    let spelled = state.relative(&root.join("content/about.html"));
+    assert_eq!(spelled, "content/about.html");
+    assert!(!spelled.contains('\\'));
 }
 
 #[test]

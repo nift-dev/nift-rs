@@ -141,9 +141,12 @@ pub enum ProjectErrorKind {
     TrackingJson,
     /// Semantically invalid tracked entry (reject; class `invalid-tracking-json`).
     TrackingValue,
-    /// Duplicate tracked name or duplicate resolved content/output path
-    /// (corpus class `duplicate-tracked-name`).
+    /// Duplicate literal tracked name (corpus class `duplicate-tracked-name`).
     DuplicateName,
+    /// Two distinct tracked names resolve to the same content or output path.
+    /// This is ordinary invalid tracking (class `invalid-tracking-json`), NOT
+    /// a duplicate-name failure.
+    PathCollision,
     /// A project JSON document read through the shared cache failed
     /// (render-support read; not a project-state reject class).
     JsonRead,
@@ -159,6 +162,7 @@ impl ProjectErrorKind {
             ProjectErrorKind::TrackingJson => "invalid-tracking-json",
             ProjectErrorKind::TrackingValue => "invalid-tracking-json",
             ProjectErrorKind::DuplicateName => "duplicate-tracked-name",
+            ProjectErrorKind::PathCollision => "invalid-tracking-json",
             ProjectErrorKind::JsonRead => "json-read",
         }
     }
@@ -272,7 +276,7 @@ impl ProjectState {
     /// Thread-safe shared source read with the reference caching. `None` when
     /// the source cannot be read. Never writes to the paths read here.
     pub fn read_shared_source(&self, path: &Path) -> Option<Arc<str>> {
-        let key = lexically_normal(path).to_string_lossy().replace('\\', "/");
+        let key = generic_string(&lexically_normal(path));
         {
             let cache = lock(&self.source_cache);
             if let Some(hit) = cache.get(&key) {
@@ -288,9 +292,7 @@ impl ProjectState {
     /// Thread-safe shared JSON read with the reference caching. On failure
     /// returns an error string (the cache only stores successful parses).
     pub fn read_shared_json(&self, path: &Path) -> Result<Arc<Value>, ProjectError> {
-        let key = absolute_normalized(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let key = generic_string(&absolute_normalized(path));
         {
             let cache = lock(&self.json_cache);
             if let Some(hit) = cache.get(&key) {
@@ -337,6 +339,26 @@ fn lexically_normal(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// `std::filesystem::path::generic_string()`: the path spelled with `/`
+/// separators regardless of platform.
+///
+/// The native separator is converted to `/`; any other character is preserved
+/// verbatim. In particular on POSIX the native and generic forms coincide and a
+/// literal backslash inside a filename is an ordinary character that must NOT
+/// be reinterpreted as a separator (so this is not a blind `\\` -> `/` text
+/// replace).
+fn generic_string(path: &Path) -> String {
+    let native = path.to_string_lossy().to_string();
+    if std::path::MAIN_SEPARATOR == '/' {
+        // POSIX: native spelling already uses `/`; preserve everything else.
+        native
+    } else {
+        // Windows: `\` is the native separator (and cannot occur inside a
+        // filename), so converting it to `/` yields the generic form.
+        native.replace('\\', "/")
+    }
 }
 
 /// `fs::path::lexically_relative()`: the relative path from `base` to `path`,
@@ -554,9 +576,9 @@ fn relative_of(root: &Path, path: &Path) -> String {
     let normalized = lexically_normal(path);
     let relative = lexical_relative(&normalized, root);
     if relative.as_os_str().is_empty() {
-        normalized.to_string_lossy().to_string()
+        generic_string(&normalized)
     } else {
-        relative.to_string_lossy().to_string()
+        generic_string(&relative)
     }
 }
 
@@ -1000,32 +1022,24 @@ fn load_tracking(
 
     let mut content_paths: Vec<String> = tracked
         .iter()
-        .map(|info| {
-            lexically_normal(&content_path_of(root, config, info))
-                .to_string_lossy()
-                .to_string()
-        })
+        .map(|info| generic_string(&lexically_normal(&content_path_of(root, config, info))))
         .collect();
     content_paths.sort_unstable();
     if content_paths.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(ProjectError::new(
-            ProjectErrorKind::DuplicateName,
+            ProjectErrorKind::PathCollision,
             "invalid tracked.json (tracked entries resolve to the same content or output path)",
         ));
     }
 
     let mut output_paths: Vec<String> = tracked
         .iter()
-        .map(|info| {
-            lexically_normal(&output_path_of(root, config, info))
-                .to_string_lossy()
-                .to_string()
-        })
+        .map(|info| generic_string(&lexically_normal(&output_path_of(root, config, info))))
         .collect();
     output_paths.sort_unstable();
     if output_paths.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(ProjectError::new(
-            ProjectErrorKind::DuplicateName,
+            ProjectErrorKind::PathCollision,
             "invalid tracked.json (tracked entries resolve to the same content or output path)",
         ));
     }
