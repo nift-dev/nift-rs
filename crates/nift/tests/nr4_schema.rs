@@ -80,3 +80,45 @@ fn schema_shape_validation() {
     assert!(check("4", r##"{"multipleOf":0}"##).is_err());
     assert!(check("5", "5").is_err());
 }
+
+#[test]
+fn unique_items_boolean_boundaries() {
+    // uniqueItems: true -> enforce.
+    let s = r##"{"type":"array","uniqueItems":true}"##;
+    assert!(check("[1,2,3]", s).is_ok());
+    assert!(check("[1,1,2]", s).is_err());
+    // uniqueItems: false -> valid, do not enforce (duplicates pass).
+    let s = r##"{"type":"array","uniqueItems":false}"##;
+    assert!(check("[1,1,2]", s).is_ok());
+    // non-boolean uniqueItems is a schema-shape error.
+    assert!(check("[]", r##"{"uniqueItems":1}"##).is_err());
+    assert!(check("[]", r##"{"uniqueItems":"yes"}"##).is_err());
+}
+
+#[test]
+fn shape_audit_multivalued_rules() {
+    // additionalProperties accepts boolean (true AND false) or a schema object.
+    assert!(check(
+        r#"{"a":1,"b":2}"#,
+        r##"{"type":"object","additionalProperties":true}"##
+    )
+    .is_ok());
+    assert!(check(
+        r#"{"a":1}"#,
+        r##"{"type":"object","additionalProperties":false}"##
+    )
+    .is_err());
+    assert!(check(
+        r#"{"a":1}"#,
+        r##"{"type":"object","additionalProperties":{"type":"number"}}"##
+    )
+    .is_ok());
+    assert!(check("[]", r##"{"additionalProperties":5}"##).is_err());
+    // Boolean schemas: both true and false are valid shapes.
+    assert!(check("5", "true").is_ok());
+    assert!(check("5", "false").is_err());
+    // type accepts a string or an array of strings.
+    assert!(check("5", r##"{"type":"number"}"##).is_ok());
+    assert!(check("5", r##"{"type":["number","string"]}"##).is_ok());
+    assert!(check("5", r##"{"type":["boolean"]}"##).is_err());
+}

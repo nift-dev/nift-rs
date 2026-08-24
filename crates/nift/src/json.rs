@@ -518,9 +518,10 @@ impl Validator {
                 ));
             }
         }
-        if schema_object.get("uniqueItems") == Some(&Value::boolean(true)) {
-        } else if schema_object.contains_key("uniqueItems") {
-            return Err(format!("uniqueItems must be boolean at {schema_path}"));
+        if let Some(value) = schema_object.get("uniqueItems") {
+            if !value.is_bool() {
+                return Err(format!("uniqueItems must be boolean at {schema_path}"));
+            }
         }
         if let Some(additional) = schema_object.get("additionalProperties") {
             if !additional.is_bool() && !additional.is_object() {
