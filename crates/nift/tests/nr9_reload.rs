@@ -248,10 +248,16 @@ fn concurrent_render_and_reload() {
     let engine = Arc::new(Engine::open(&root).unwrap());
     assert!(engine.is_open());
 
-    // All render threads and the reloader start behind one barrier so the
-    // reloads genuinely overlap with renders (otherwise a fast reloader could
-    // finish first and every render would observe the final generation only).
+    // Two barriers make the overlap deterministic (a pure start barrier can
+    // still let fast renders finish before the reloader ever publishes the
+    // other generation under CI load):
+    //   start      all render threads + the reloader begin together
+    //   after_beta renders render the initial generation once, the reloader
+    //              publishes the alternate generation, then everyone resumes
+    //              and the remaining reloads overlap with the remaining
+    //              renders.
     let start = Arc::new(Barrier::new(RENDER_THREADS + 1));
+    let after_beta = Arc::new(Barrier::new(RENDER_THREADS + 1));
     let renders_ok = Arc::new(AtomicBool::new(true));
     let saw_a = Arc::new(AtomicBool::new(false));
     let saw_b = Arc::new(AtomicBool::new(false));
@@ -262,8 +268,21 @@ fn concurrent_render_and_reload() {
         let saw_a = Arc::clone(&saw_a);
         let saw_b = Arc::clone(&saw_b);
         let start = Arc::clone(&start);
+        let after_beta = Arc::clone(&after_beta);
         workers.push(std::thread::spawn(move || {
             start.wait();
+            // One render against the initial (ALPHA) generation.
+            let result = engine.render_page("about", &Context::new()).unwrap();
+            if result.output.contains("Title-ALPHA") {
+                saw_a.store(true, Ordering::SeqCst);
+            } else if result.output.contains("Title-BETA") {
+                saw_b.store(true, Ordering::SeqCst);
+            } else {
+                renders_ok.store(false, Ordering::SeqCst);
+            }
+            // Wait for the reloader to publish the alternate generation, then
+            // continue rendering while the reloader keeps reloading.
+            after_beta.wait();
             for _ in 0..ITERATIONS {
                 let result = match engine.render_page("about", &Context::new()) {
                     Ok(result) => result,
@@ -297,10 +316,22 @@ fn concurrent_render_and_reload() {
     let engine_reloader = Arc::clone(&engine);
     let reloads_ok_2 = Arc::clone(&reloads_ok);
     let start = Arc::clone(&start);
+    let after_beta = Arc::clone(&after_beta);
     let root2 = root.clone();
     let reloader = std::thread::spawn(move || {
         start.wait();
-        for i in 0..RELOADS {
+        // Publish the alternate generation first so the renders deterministically
+        // observe both ALPHA (before) and BETA (after) while reloads overlap
+        // with renders.
+        write_file_atomic(
+            &root2.join(".nift/tracked.json"),
+            &tracked_with_title("Title-BETA"),
+        );
+        if engine_reloader.reload().is_err() {
+            reloads_ok_2.store(false, Ordering::SeqCst);
+        }
+        after_beta.wait();
+        for i in 1..RELOADS {
             if i % 5 == 4 {
                 write_file_atomic(&root2.join(".nift/tracked.json"), "{ not json");
                 if engine_reloader.reload().is_ok() {
