@@ -20,6 +20,41 @@ use indexmap::IndexMap;
 /// Per-render scoped value bindings (from `@for` loops and, later, `@json`).
 pub type JsonBindings = IndexMap<String, Value>;
 
+/// The active pagination window exposed to expression evaluation (reference
+/// `resolve_pagination_value`). Only present while rendering a pagination
+/// template, where `paginate.*` values resolve ahead of JSON bindings.
+#[derive(Debug, Clone)]
+pub struct PaginationView {
+    /// The separator-joined rendered items for the current page.
+    pub items: String,
+    /// One-based current page number.
+    pub current: usize,
+    /// Total number of pages.
+    pub total: usize,
+}
+
+/// `paginate.*` value resolution (reference `resolve_pagination_value`).
+pub(crate) fn pagination_value(expression: &str, view: &PaginationView) -> Option<Value> {
+    match expression {
+        "paginate.items" => Some(Value::string(view.items.as_str())),
+        "paginate.current" => Some(Value::number(view.current as f64)),
+        "paginate.total" => Some(Value::number(view.total as f64)),
+        "paginate.first" => Some(Value::boolean(view.current == 1)),
+        "paginate.last" => Some(Value::boolean(view.current == view.total)),
+        "paginate.previous" => Some(Value::number(if view.current > 1 {
+            view.current - 1
+        } else {
+            1
+        } as f64)),
+        "paginate.next" => Some(Value::number(if view.current < view.total {
+            view.current + 1
+        } else {
+            view.total
+        } as f64)),
+        _ => None,
+    }
+}
+
 /// Save the current values of `keys`, apply a mutation closure, then restore.
 /// `apply` receives the same borrow the caller mutates.
 pub fn with_bindings<T>(
@@ -73,7 +108,21 @@ pub fn resolve_json_value(
                     match host.contract_source(root) {
                         Some(source) => {
                             let path = crate::parser::lexically_normal(&host.root().join(source));
-                            host.read_json(&path).map_err(|e| {
+                            if !crate::parser::path_within(host.root(), &path) {
+                                return Err(RenderError::new(
+                                    ErrorKind::Render,
+                                    format!(
+                                        "contract '{root}': path must stay inside the Nift project: {source}"
+                                    ),
+                                ));
+                            }
+                            if !host.source_exists(&path) {
+                                return Err(RenderError::new(
+                                    ErrorKind::Render,
+                                    format!("contract '{root}': file does not exist: {source}"),
+                                ));
+                            }
+                            let value = host.read_json(&path).map_err(|e| {
                                 RenderError::new(
                                     ErrorKind::Render,
                                     format!(
@@ -81,7 +130,12 @@ pub fn resolve_json_value(
                                         e.message
                                     ),
                                 )
-                            })?
+                            })?;
+                            host.record_dependencies(&[
+                                host.relative(&host.root().join(".nift/config.json")),
+                                host.relative(&path),
+                            ]);
+                            value
                         }
                         None => return Ok(None),
                     }
@@ -176,6 +230,7 @@ pub fn evaluate_expression(
     host: &dyn RenderHost,
     identity: &RenderIdentity,
     expression: &str,
+    pagination: Option<&PaginationView>,
 ) -> Result<Value, RenderError> {
     fn is_compound(text: &str) -> bool {
         [
@@ -190,8 +245,16 @@ pub fn evaluate_expression(
         host: &dyn RenderHost,
         identity: &RenderIdentity,
         raw: &str,
+        pagination: Option<&PaginationView>,
     ) -> Result<Option<Value>, RenderError> {
         let text = raw.trim();
+        // Pagination values resolve ahead of host/JSON/contract bindings,
+        // exactly like the reference resolve_direct.
+        if let Some(view) = pagination {
+            if let Some(value) = pagination_value(text, view) {
+                return Ok(Some(value));
+            }
+        }
         match resolve_json_value(bindings, host, text) {
             Ok(Some(value)) => return Ok(Some(value)),
             Ok(None) => {}
@@ -339,6 +402,7 @@ pub fn evaluate_expression(
         host: &dyn RenderHost,
         identity: &RenderIdentity,
         raw: &str,
+        pagination: Option<&PaginationView>,
     ) -> Result<Value, RenderError> {
         let mut text = raw.trim().to_string();
         if text.is_empty() {
@@ -353,30 +417,36 @@ pub fn evaluate_expression(
 
         // Direct resolution first (metadata/JSON names preserved before
         // interpreting punctuation as arithmetic).
-        if let Some(value) = resolve_direct(bindings, host, identity, &text)? {
+        if let Some(value) = resolve_direct(bindings, host, identity, &text, pagination)? {
             return Ok(value);
         }
 
         if let Some(pos) = find_top_level_op(&text, "||") {
-            let left = eval(bindings, host, identity, &text[..pos])?;
+            let left = eval(bindings, host, identity, &text[..pos], pagination)?;
             if truthy(&left) {
                 return Ok(Value::boolean(true));
             }
-            let right = eval(bindings, host, identity, &text[pos + 2..])?;
+            let right = eval(bindings, host, identity, &text[pos + 2..], pagination)?;
             return Ok(Value::boolean(truthy(&right)));
         }
         if let Some(pos) = find_top_level_op(&text, "&&") {
-            let left = eval(bindings, host, identity, &text[..pos])?;
+            let left = eval(bindings, host, identity, &text[..pos], pagination)?;
             if !truthy(&left) {
                 return Ok(Value::boolean(false));
             }
-            let right = eval(bindings, host, identity, &text[pos + 2..])?;
+            let right = eval(bindings, host, identity, &text[pos + 2..], pagination)?;
             return Ok(Value::boolean(truthy(&right)));
         }
         for op in ["==", "!=", "<=", ">=", "<", ">"] {
             if let Some(pos) = find_top_level_op(&text, op) {
-                let left = eval(bindings, host, identity, &text[..pos])?;
-                let right = eval(bindings, host, identity, &text[pos + op.len()..])?;
+                let left = eval(bindings, host, identity, &text[..pos], pagination)?;
+                let right = eval(
+                    bindings,
+                    host,
+                    identity,
+                    &text[pos + op.len()..],
+                    pagination,
+                )?;
                 if op == "==" || op == "!=" {
                     let equal = scalar_equal(&left, &right)?;
                     return Ok(Value::boolean(if op == "==" { equal } else { !equal }));
@@ -392,7 +462,7 @@ pub fn evaluate_expression(
             }
         }
         if text.starts_with('!') && !text.starts_with("!=") {
-            let operand = eval(bindings, host, identity, &text[1..])?;
+            let operand = eval(bindings, host, identity, &text[1..], pagination)?;
             return Ok(Value::boolean(!truthy(&operand)));
         }
 
@@ -400,8 +470,8 @@ pub fn evaluate_expression(
         if let Some(pos) =
             find_binary_arithmetic(&text, "+-").or_else(|| find_binary_arithmetic(&text, "*/%"))
         {
-            let left = eval(bindings, host, identity, &text[..pos])?;
-            let right = eval(bindings, host, identity, &text[pos + 1..])?;
+            let left = eval(bindings, host, identity, &text[..pos], pagination)?;
+            let right = eval(bindings, host, identity, &text[pos + 1..], pagination)?;
             let (Value::Number(a), Value::Number(b)) = (&left, &right) else {
                 return Err(RenderError::new(
                     ErrorKind::Render,
@@ -444,7 +514,7 @@ pub fn evaluate_expression(
 
         // Unary +/-
         if (text.starts_with('+') || text.starts_with('-')) && text.len() > 1 {
-            let operand = eval(bindings, host, identity, &text[1..])?;
+            let operand = eval(bindings, host, identity, &text[1..], pagination)?;
             match operand {
                 Value::Number(n) => {
                     return Ok(Value::number(if text.starts_with('-') { -n } else { n }));
@@ -464,7 +534,7 @@ pub fn evaluate_expression(
         ))
     }
 
-    eval(bindings, host, identity, expression)
+    eval(bindings, host, identity, expression, pagination)
 }
 
 /// `==`/`!=` scalar comparison (matching the reference; non-scalar types are an
@@ -745,6 +815,7 @@ pub fn evaluate_collection_value(
     host: &dyn RenderHost,
     identity: &RenderIdentity,
     expression: &str,
+    pagination: Option<&PaginationView>,
 ) -> Result<Value, RenderError> {
     let text = expression.trim();
     if text.is_empty() {
@@ -754,7 +825,7 @@ pub fn evaluate_collection_value(
         ));
     }
     if !text.starts_with('@') {
-        return evaluate_expression(bindings, host, identity, text);
+        return evaluate_expression(bindings, host, identity, text, pagination);
     }
 
     let mut name_end = 1;
@@ -797,7 +868,7 @@ pub fn evaluate_collection_value(
     let error = |message: String| RenderError::new(ErrorKind::Render, message);
 
     let collection_arg = |bindings: &mut JsonBindings, raw: &str| -> Result<Value, RenderError> {
-        let value = evaluate_collection_value(bindings, host, identity, raw)?;
+        let value = evaluate_collection_value(bindings, host, identity, raw, pagination)?;
         if !value.is_array() {
             return Err(error(format!(
                 "{function}: collection must resolve to an array"
@@ -839,7 +910,7 @@ pub fn evaluate_collection_value(
         let source = collection_arg(bindings, &params[0])?;
         let index =
             |bindings: &mut JsonBindings, raw: &str, label: &str| -> Result<usize, RenderError> {
-                let v = evaluate_expression(bindings, host, identity, raw)?;
+                let v = evaluate_expression(bindings, host, identity, raw, pagination)?;
                 match v {
                     Value::Number(n) if n >= 0.0 && n.trunc() == n && n <= usize::MAX as f64 => {
                         Ok(n as usize)
@@ -1004,7 +1075,8 @@ pub fn evaluate_collection_value(
         }
         let source = collection_arg(bindings, &source_text)?;
         let source_array = source.as_array().map(|a| a.to_vec()).unwrap_or_default();
-        let mut accumulator_value = evaluate_expression(bindings, host, identity, &initial)?;
+        let mut accumulator_value =
+            evaluate_expression(bindings, host, identity, &initial, pagination)?;
         for element in &source_array {
             accumulator_value = with_scoped(
                 bindings,
@@ -1017,7 +1089,8 @@ pub fn evaluate_collection_value(
                         &bindings_list,
                         element,
                         |bindings| -> Result<(), RenderError> {
-                            next = evaluate_expression(bindings, host, identity, &expr)?;
+                            next =
+                                evaluate_expression(bindings, host, identity, &expr, pagination)?;
                             Ok(())
                         },
                     )?;
@@ -1057,7 +1130,7 @@ pub fn evaluate_collection_value(
 
     for element in &source_array {
         let evaluated = with_iteration_binding(bindings, &bindings_list, element, |bindings| {
-            evaluate_expression(bindings, host, identity, &expr_owned)
+            evaluate_expression(bindings, host, identity, &expr_owned, pagination)
         })?;
         match function {
             "filter" => {

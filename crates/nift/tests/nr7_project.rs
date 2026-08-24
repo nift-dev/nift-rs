@@ -672,9 +672,10 @@ fn relative_generic_spelling() {
         "content/blog/index.html"
     );
 
-    // Root-equal fallback returns the normalized absolute generic path, not ".".
-    let expected_root = state.root().to_string_lossy().replace('\\', "/");
-    assert_eq!(state.relative(state.root()), expected_root);
+    // Root-equal spelling is ".": the C++ reference's lexically_relative(root,
+    // root) returns "." (probed against the frozen compiler), so relative_of
+    // spells the root itself as "." rather than an absolute path.
+    assert_eq!(state.relative(state.root()), ".");
 
     // Outside-root spelling is the lexical `..` form.
     assert_eq!(

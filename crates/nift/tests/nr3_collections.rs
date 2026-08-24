@@ -41,7 +41,7 @@ fn eval_collection(expr: &str) -> String {
     let host = make_host(&defaults, &context);
     let identity = RenderIdentity::new().name("t").title("T");
     let mut bindings = nift::expr::JsonBindings::new();
-    let value = evaluate_collection_value(&mut bindings, &host, &identity, expr)
+    let value = evaluate_collection_value(&mut bindings, &host, &identity, expr, None)
         .expect("collection evaluation should succeed");
     dump_compact(&value)
 }

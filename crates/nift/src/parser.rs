@@ -30,6 +30,10 @@ use std::path::{Component, Path, PathBuf};
 /// Maximum template parse depth before recursion is rejected.
 const MAX_PARSE_DEPTH: usize = 64;
 
+/// The marker emitted by `@paginate`, replaced by the rendered pagination
+/// template when the primary page is assembled (reference `\x1dNIFT_PAGINATE\x1d`).
+pub(crate) const PAGINATION_MARKER: &str = "\u{1d}NIFT_PAGINATE\u{1d}";
+
 /// Renders a template (optionally composed with a page source) through the
 /// host seam. `page` is the `@content` source; when provided, exactly one
 /// `@content` is required in the rendered output.
@@ -71,6 +75,235 @@ pub fn render(
     Ok(result)
 }
 
+/// Renders a tracked page through a project-aware host (NR8): content/template
+/// geometry from the tracked record, exactly-one `@content` when a template is
+/// configured, and the page's PRIMARY pagination output for paginated tracked
+/// pages (reference `Parser::render()`).
+pub fn render_tracked(
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    paginate: Option<&crate::project::PaginationConfig>,
+) -> Result<RenderResult, RenderError> {
+    let content_path = host.content_path(identity);
+    let mut state = RenderState {
+        pagination_collecting: paginate.is_some(),
+        ..RenderState::default()
+    };
+
+    let template_path = identity.template_path.clone().unwrap_or_default();
+    let output = if template_path.is_empty() {
+        if !host.source_readable(&content_path) {
+            return Err(RenderError::new(
+                ErrorKind::MissingSource,
+                format!("content file is not readable: {}", content_path.display()),
+            ));
+        }
+        let content_source = host.read_source(&content_path).map_err(|e| {
+            RenderError::new(
+                e.kind,
+                format!("content file is not readable: {}", content_path.display()),
+            )
+        })?;
+        state
+            .input_stack
+            .push(content_path.to_string_lossy().to_string());
+        let output = parse(
+            &mut state,
+            host,
+            identity,
+            None,
+            &content_source,
+            &content_path,
+            0,
+        )?;
+        state.input_stack.pop();
+        state.dependencies.insert(host.relative(&content_path));
+        output
+    } else {
+        let template_path = host.root().join(&template_path);
+        if !host.source_exists(&template_path) {
+            return Err(RenderError::new(
+                ErrorKind::MissingSource,
+                format!("template file does not exist: {}", template_path.display()),
+            ));
+        }
+        if !host.source_readable(&template_path) {
+            return Err(RenderError::new(
+                ErrorKind::MissingSource,
+                format!("template file is not readable: {}", template_path.display()),
+            ));
+        }
+        let template_source = host.read_source(&template_path).map_err(|e| {
+            RenderError::new(
+                e.kind,
+                format!("template file is not readable: {}", template_path.display()),
+            )
+        })?;
+        state.dependencies.insert(host.relative(&template_path));
+        state
+            .input_stack
+            .push(template_path.to_string_lossy().to_string());
+        let output = parse(
+            &mut state,
+            host,
+            identity,
+            Some(&Source::path(&content_path)),
+            &template_source,
+            &template_path,
+            0,
+        )?;
+        state.input_stack.pop();
+        if state.content_count != 1 {
+            return Err(RenderError::new(
+                ErrorKind::Render,
+                "templated tracked items must execute exactly one @content; add @content through the template/input graph or omit the tracked template field",
+            ));
+        }
+        output
+    };
+
+    let mut output = output;
+    if let Some(pagination) = paginate {
+        output = assemble_primary_pagination(
+            &mut state,
+            host,
+            identity,
+            &content_path,
+            &output,
+            pagination,
+        )?;
+    }
+
+    let mut result = RenderResult::new(output);
+    result.dependencies = state.dependencies;
+    result.requirements = state.requirements;
+    Ok(result)
+}
+
+/// Assembles the PRIMARY pagination page (reference `Parser::render()`
+/// pagination tail): exactly one `@paginate`, the pagination template and
+/// separator geometry, the page-1 item window and the marker replacement.
+fn assemble_primary_pagination(
+    state: &mut RenderState,
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    content_path: &Path,
+    base_output: &str,
+    pagination: &crate::project::PaginationConfig,
+) -> Result<String, RenderError> {
+    if state.paginate_count != 1 {
+        return Err(RenderError::new(
+            ErrorKind::Render,
+            "paginated tracked items must execute exactly one @paginate",
+        ));
+    }
+
+    let conventional = |suffix: &str| -> PathBuf {
+        let parent = content_path.parent().unwrap_or(content_path);
+        let stem = content_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        parent.join(format!("{stem}{suffix}.html"))
+    };
+    let pagination_template = match &pagination.template_path {
+        Some(path) => crate::parser::lexically_normal(&host.root().join(path)),
+        None => conventional(".paginate"),
+    };
+    if !path_within(host.root(), &pagination_template)
+        || !host.source_readable(&pagination_template)
+    {
+        return Err(RenderError::new(
+            ErrorKind::Render,
+            "pagination template is missing, unreadable, or outside the project",
+        ));
+    }
+
+    let mut separator = PathBuf::new();
+    if let Some(separator_path) = &pagination.separator_path {
+        separator = crate::parser::lexically_normal(&host.root().join(separator_path));
+    } else {
+        let candidate = conventional(".separator");
+        if host.source_exists(&candidate) {
+            separator = candidate;
+        }
+    }
+    if !separator.as_os_str().is_empty()
+        && (!path_within(host.root(), &separator) || !host.source_readable(&separator))
+    {
+        return Err(RenderError::new(
+            ErrorKind::Render,
+            "pagination separator is unreadable or outside the project",
+        ));
+    }
+
+    state
+        .dependencies
+        .insert(host.relative(&pagination_template));
+    if !separator.as_os_str().is_empty() {
+        state.dependencies.insert(host.relative(&separator));
+    }
+
+    let total = std::cmp::max(
+        1,
+        state
+            .pagination_items
+            .len()
+            .div_ceil(pagination.items_per_page),
+    );
+    let separator_source = if separator.as_os_str().is_empty() {
+        None
+    } else {
+        host.read_source(&separator)
+            .ok()
+            .map(|cow| cow.into_owned())
+    };
+
+    // Page-1 item window.
+    let finish = std::cmp::min(state.pagination_items.len(), pagination.items_per_page);
+    let mut items = String::new();
+    for index in 0..finish {
+        if index != 0 {
+            if let Some(separator) = &separator_source {
+                items.push_str(separator);
+            }
+        }
+        items.push_str(&state.pagination_items[index]);
+    }
+
+    state.pagination_items_text = Some(items);
+    state.pagination_current = 1;
+    state.pagination_total = total;
+    state.pagination_context_active = true;
+    state.pagination_collecting = false;
+    state.pagination_current_output = Some(host.pagination_output_path(identity, 1));
+
+    let page_source = host.read_source(&pagination_template).map_err(|_| {
+        RenderError::new(
+            ErrorKind::Render,
+            "pagination template is missing, unreadable, or outside the project",
+        )
+    })?;
+    let rendered = parse(
+        state,
+        host,
+        identity,
+        Some(&Source::path(content_path)),
+        &page_source,
+        &pagination_template,
+        0,
+    )?;
+
+    let mut output = base_output.to_string();
+    if let Some(marker_position) = output.find(PAGINATION_MARKER) {
+        output.replace_range(
+            marker_position..marker_position + PAGINATION_MARKER.len(),
+            &rendered,
+        );
+    }
+    Ok(output)
+}
+
 /// Per-render mutable state that persists across recursive parses.
 struct RenderState {
     content_count: usize,
@@ -88,10 +321,37 @@ struct RenderState {
     pagination_total: usize,
     pagination_context_active: bool,
     pagination_current_output: Option<PathBuf>,
+    /// Whether `@item`/`@paginate` are collecting (rendering the primary
+    /// content of a paginated tracked page).
+    pagination_collecting: bool,
+    /// Rendered `@item` outputs in encounter order (reference
+    /// `result_.pagination_items`).
+    pagination_items: Vec<String>,
+    /// Number of `@paginate` directives executed (exactly one required).
+    paginate_count: usize,
+    /// The separator-joined rendered items for the page currently being
+    /// assembled (reference `pagination_items_text_`; the `paginate.items`
+    /// value).
+    pagination_items_text: Option<String>,
     /// Dependency spellings discovered during rendering (root-relative).
     dependencies: std::collections::BTreeSet<String>,
     /// Requirement spellings discovered during rendering (root-relative).
     requirements: std::collections::BTreeSet<String>,
+}
+
+impl RenderState {
+    /// The pagination window exposed to expression evaluation, when active.
+    fn pagination_view(&self) -> Option<crate::expr::PaginationView> {
+        if self.pagination_context_active {
+            Some(crate::expr::PaginationView {
+                items: self.pagination_items_text.clone().unwrap_or_default(),
+                current: self.pagination_current,
+                total: self.pagination_total,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for RenderState {
@@ -108,6 +368,10 @@ impl Default for RenderState {
             pagination_total: 1,
             pagination_context_active: false,
             pagination_current_output: None,
+            pagination_collecting: false,
+            pagination_items: Vec::new(),
+            paginate_count: 0,
+            pagination_items_text: None,
             dependencies: std::collections::BTreeSet::new(),
             requirements: std::collections::BTreeSet::new(),
         }
@@ -238,7 +502,13 @@ fn parse(
         if text[i..].starts_with("$[") {
             if let Some(end) = scan_brackets(text, i + 2) {
                 let key = &text[i + 2..end];
-                match crate::expr::evaluate_expression(&state.json_bindings, host, identity, key) {
+                match crate::expr::evaluate_expression(
+                    &state.json_bindings,
+                    host,
+                    identity,
+                    key,
+                    state.pagination_view().as_ref(),
+                ) {
                     Ok(value) => {
                         match value {
                             Value::Array(_) | Value::Object(_) => {
@@ -284,33 +554,88 @@ fn parse(
             }
         }
 
-        // @item / @paginate: NR3 parse semantics only. Pagination is a tracked
-        // page concern (NR8); outside it these are controlled errors.
+        // @item: outside pagination collection it is a controlled error; while
+        // rendering a paginated tracked page it collects the rendered body as a
+        // pagination item (reference Parser @item).
         if text[i..].starts_with("@item")
             && (i + 5 == len
                 || matches!(text.as_bytes()[i + 5], b'{')
                 || text.as_bytes()[i + 5].is_ascii_whitespace())
         {
-            return Err(error_at(
-                ErrorKind::Render,
-                "@item requires pagination on the tracked item",
-                text,
-                i,
+            if !state.pagination_collecting {
+                return Err(error_at(
+                    ErrorKind::Render,
+                    "@item requires pagination on the tracked item",
+                    text,
+                    i,
+                    source_path,
+                ));
+            }
+            let mut block_open = i + 5;
+            while block_open < len && text.as_bytes()[block_open].is_ascii_whitespace() {
+                block_open += 1;
+            }
+            if block_open >= len || text.as_bytes()[block_open] != b'{' {
+                return Err(error_at(
+                    ErrorKind::Parse,
+                    "@item must be followed by a '{...}' block",
+                    text,
+                    i,
+                    source_path,
+                ));
+            }
+            let block_close = find_balanced(text, block_open, b'{', b'}').ok_or_else(|| {
+                error_at(
+                    ErrorKind::Parse,
+                    "@item block has no matching '}'",
+                    text,
+                    block_open,
+                    source_path,
+                )
+            })?;
+            let body = normalize_control_block_body(&text[block_open + 1..block_close]);
+            let nested = parse_with_scope(
+                state,
+                host,
+                identity,
+                page,
+                &body.text,
                 source_path,
-            ));
+                depth + 1,
+            )?;
+            state.pagination_items.push(nested);
+            i = block_close + 1;
+            continue;
         }
+        // @paginate: emits the pagination marker; exactly one is allowed per
+        // paginated tracked render.
         if text[i..].starts_with("@paginate")
             && (i + 9 == len
                 || !(text.as_bytes()[i + 9].is_ascii_alphanumeric()
                     || text.as_bytes()[i + 9] == b'_'))
         {
-            return Err(error_at(
-                ErrorKind::Render,
-                "@paginate requires pagination on the tracked item",
-                text,
-                i,
-                source_path,
-            ));
+            if !state.pagination_collecting {
+                return Err(error_at(
+                    ErrorKind::Render,
+                    "@paginate requires pagination on the tracked item",
+                    text,
+                    i,
+                    source_path,
+                ));
+            }
+            state.paginate_count += 1;
+            if state.paginate_count > 1 {
+                return Err(error_at(
+                    ErrorKind::Render,
+                    "paginated tracked items must execute exactly one @paginate",
+                    text,
+                    i,
+                    source_path,
+                ));
+            }
+            output.push_str(PAGINATION_MARKER);
+            i += 9;
+            continue;
         }
 
         // @for(...){...} over arrays or objects.
@@ -363,16 +688,18 @@ fn parse(
             let (collection_expression, sort_expression, sort_descending) =
                 parse_for_collection_clause(collection_clause)?;
 
+            let pagination = state.pagination_view();
             let collection_value = crate::expr::evaluate_collection_value(
                 &mut state.json_bindings,
                 host,
                 identity,
                 &collection_expression,
+                pagination.as_ref(),
             )
             .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
 
             let body = normalize_control_block_body(&text[block_open + 1..block_close]);
-            let body_multiline = body.contains('\n');
+            let body_multiline = body.multiline;
             let control_indent = insertion_indent(&output);
             let insertion_code_block_depth = state.code_block_depth;
 
@@ -506,7 +833,7 @@ fn parse(
                             host,
                             identity,
                             page,
-                            &body,
+                            &body.text,
                             source_path,
                             depth + 1,
                         ) {
@@ -730,7 +1057,7 @@ fn parse(
                             host,
                             identity,
                             page,
-                            &body,
+                            &body.text,
                             source_path,
                             depth + 1,
                         ) {
@@ -818,6 +1145,7 @@ fn parse(
                 host,
                 identity,
                 &text[i + 4..condition_close],
+                state.pagination_view().as_ref(),
             )
             .map(|value| truthy(&value))
             .map_err(|e| {
@@ -833,8 +1161,15 @@ fn parse(
             let mut chain_end = block_close + 1;
             if condition_value {
                 let body = normalize_control_block_body(&text[block_open + 1..block_close]);
-                let nested =
-                    parse_with_scope(state, host, identity, page, &body, source_path, depth + 1)?;
+                let nested = parse_with_scope(
+                    state,
+                    host,
+                    identity,
+                    page,
+                    &body.text,
+                    source_path,
+                    depth + 1,
+                )?;
                 append_indented(
                     &mut output,
                     &nested,
@@ -898,6 +1233,7 @@ fn parse(
                             host,
                             identity,
                             &text[cursor + 1..else_condition_close],
+                            state.pagination_view().as_ref(),
                         )
                         .map(|value| truthy(&value))
                         .map_err(|e| {
@@ -941,7 +1277,7 @@ fn parse(
                         host,
                         identity,
                         page,
-                        &body,
+                        &body.text,
                         source_path,
                         depth + 1,
                     )?;
@@ -1056,7 +1392,23 @@ fn parse(
                         source_path,
                     ));
                 }
-                let (content_text, content_identity) = resolve_source(host, page)?;
+                let (content_text, content_identity) = match resolve_source(host, page) {
+                    Ok(pair) => pair,
+                    Err(_) if matches!(page, Source::Path(_)) => {
+                        // Reference message for a missing/unreadable content
+                        // page (the corpus missing-source reject class).
+                        return Err(error_at(
+                            ErrorKind::MissingSource,
+                            "content file is not readable",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(error_at(e.kind, e.message, text, i, source_path));
+                    }
+                };
                 // The reference only guards against input loops when the
                 // content identity is non-empty (text sources without a
                 // logical name have an empty identity and are never looped).
@@ -1133,11 +1485,13 @@ fn parse(
                     end
                 };
                 let call = format!("@{function}{}", &text[name_end..call_end]);
+                let pagination = state.pagination_view();
                 let result = crate::expr::evaluate_collection_value(
                     &mut state.json_bindings,
                     host,
                     identity,
                     &call,
+                    pagination.as_ref(),
                 )
                 .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
                 output += &crate::expr::dump_compact(&result);
@@ -1202,11 +1556,13 @@ fn parse(
                 {
                     expression = expression[2..expression.len() - 1].to_string();
                 }
+                let pagination = state.pagination_view();
                 let array_value = crate::expr::evaluate_collection_value(
                     &mut state.json_bindings,
                     host,
                     identity,
                     &expression,
+                    pagination.as_ref(),
                 )
                 .map_err(|e| {
                     error_at(
@@ -2001,6 +2357,9 @@ fn resolve_source(
 
 /// Lexical relative path of `path` against `base` (mirroring the reference's
 /// `lexically_relative`), used by containment checks.
+/// `std::filesystem::path::lexically_relative()`. Returns `.` when the paths
+/// are equivalent (the C++ reference returns `.`, not an empty path, for equal
+/// paths); the index-page `@pathto` branch depends on that exact result.
 fn lexically_relative(path: &Path, base: &Path) -> PathBuf {
     let path_components: Vec<Component> = path.components().collect();
     let base_components: Vec<Component> = base.components().collect();
@@ -2016,12 +2375,15 @@ fn lexically_relative(path: &Path, base: &Path) -> PathBuf {
     for component in &path_components[common..] {
         result.push(component.as_os_str());
     }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
     result
 }
 
 /// Whether `candidate` stays lexically inside `base` (reference
 /// `path_within`): the candidate's relative path must not escape via `..`.
-fn path_within(base: &Path, candidate: &Path) -> bool {
+pub(crate) fn path_within(base: &Path, candidate: &Path) -> bool {
     let base_norm = lexically_normal(base);
     let cand_norm = lexically_normal(candidate);
     let rel = lexically_relative(&cand_norm, &base_norm);
@@ -2190,15 +2552,24 @@ fn is_pre_open(text: &str, pos: usize, size: usize) -> bool {
 
 /// Strip the structural first line of a control block body and remove the
 /// common indentation of the remaining non-empty lines (readability only, not
-/// output indentation).
-fn normalize_control_block_body(body: &str) -> String {
+/// output indentation). `multiline` records whether the block used the usual
+/// structural form (leading newline inside the braces); the reference uses it
+/// to decide whether `@for` iterations are joined by a newline.
+struct NormalizedBody {
+    text: String,
+    multiline: bool,
+}
+
+fn normalize_control_block_body(body: &str) -> NormalizedBody {
     let mut body = body.to_string();
     let bytes_len = |s: &str| s.len();
+    let mut multiline = false;
     let mut first = 0;
     while first < body.len() && matches!(body.as_bytes()[first], b' ' | b'\t') {
         first += 1;
     }
     if first < body.len() && matches!(body.as_bytes()[first], b'\n' | b'\r') {
+        multiline = true;
         if body.as_bytes()[first] == b'\r'
             && first + 1 < body.len()
             && body.as_bytes()[first + 1] == b'\n'
@@ -2264,7 +2635,10 @@ fn normalize_control_block_body(body: &str) -> String {
         }
     }
     let _ = bytes_len; // (kept for symmetry with the reference; no-op)
-    body
+    NormalizedBody {
+        text: body,
+        multiline,
+    }
 }
 
 fn line_column(text: &str, offset: usize) -> (usize, usize) {
@@ -2403,7 +2777,13 @@ fn interpolate_parameter(
         match crate::expr::scan_balanced_bracket(after) {
             Some(end_rel) => {
                 let key = &after[..end_rel];
-                match crate::expr::evaluate_expression(&state.json_bindings, host, identity, key) {
+                match crate::expr::evaluate_expression(
+                    &state.json_bindings,
+                    host,
+                    identity,
+                    key,
+                    state.pagination_view().as_ref(),
+                ) {
                     Ok(value) => match value {
                         Value::Array(_) | Value::Object(_) => {
                             return Err(RenderError::new(

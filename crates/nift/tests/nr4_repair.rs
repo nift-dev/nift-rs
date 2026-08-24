@@ -155,6 +155,12 @@ impl<'a> RenderHost for ContractHost<'a> {
     fn read_source(&self, _path: &Path) -> Result<Cow<'_, str>, RenderError> {
         Err(RenderError::new(ErrorKind::MissingSource, "no source"))
     }
+    fn source_exists(&self, path: &Path) -> bool {
+        self.read_json(path).is_ok()
+    }
+    fn source_readable(&self, path: &Path) -> bool {
+        self.read_json(path).is_ok()
+    }
     fn is_contract_name(&self, name: &str) -> bool {
         self.contracts.contains_key(name)
     }

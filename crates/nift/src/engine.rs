@@ -29,12 +29,15 @@ type SourceLoader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// A custom environment provider: `name -> Option<value>`.
 type EnvironmentProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// The public standalone Embedded Nift rendering engine.
+/// The public Embedded Nift rendering engine.
 pub struct Engine {
     root: PathBuf,
     defaults: Bindings,
     loader: Option<SourceLoader>,
     environment_provider: Option<EnvironmentProvider>,
+    /// The immutable project snapshot (NR8) when the Engine was constructed via
+    /// [`Engine::open`]; `None` for the deterministic standalone Engine.
+    project: Option<Arc<crate::project::ProjectState>>,
 }
 
 impl Default for Engine {
@@ -52,6 +55,7 @@ impl Engine {
             defaults: Bindings::new(),
             loader: None,
             environment_provider: None,
+            project: None,
         }
     }
 
@@ -103,6 +107,78 @@ impl Engine {
         self.defaults
             .set(name, value)
             .map_err(|e| RenderError::new(ErrorKind::Render, e.to_string()))
+    }
+
+    /// Project-aware construction (NR8): associate the Engine with a Nift
+    /// project at `project_root`, loading and validating `.nift/config.json`
+    /// and `.nift/tracked.json` into an immutable snapshot. The snapshot is
+    /// never mutated and never reloaded implicitly; every `render_page` call
+    /// observes it for the Engine's lifetime. The default Engine stays
+    /// deterministic standalone and never walks the filesystem.
+    ///
+    /// `Engine` remains `Send + Sync` and concurrent `render_page` calls are
+    /// supported; the reload/generation lifecycle is NR9.
+    pub fn open(root: impl Into<PathBuf>) -> Result<Engine, crate::project::ProjectError> {
+        let state = crate::project::ProjectState::open(root.into())?;
+        let mut engine = Engine::new();
+        engine.root = state.root().to_path_buf();
+        engine.project = Some(Arc::new(state));
+        Ok(engine)
+    }
+
+    /// Whether a project snapshot is loaded (see [`Engine::open`]).
+    pub fn is_open(&self) -> bool {
+        self.project.is_some()
+    }
+
+    /// Project-aware rendering by tracked page name, e.g. `render_page("about")`.
+    /// The page's content/template/output geometry comes from the project
+    /// snapshot; `@pathto`, `@input`, `@json`, contracts, dependencies,
+    /// requirements and the primary pagination output behave exactly like the
+    /// CLI. The page-name argument is authoritative (the Context's page name is
+    /// ignored) and the project defines the current output (a Context output is
+    /// ignored). Context value overlays and the title override Engine defaults
+    /// and the tracked title. A failed project open or an unknown page name is a
+    /// controlled error in the returned `Result`, never a panic.
+    ///
+    /// For a paginated tracked page this renders the page's PRIMARY output
+    /// (`render_page("blog/") == public/blog/index.html`); arbitrary
+    /// pagination-page selection is outside this contract.
+    pub fn render_page(
+        &self,
+        page_name: &str,
+        context: &Context,
+    ) -> Result<RenderResult, RenderError> {
+        let Some(snapshot) = &self.project else {
+            return Err(RenderError::new(ErrorKind::Render, "not a Nift project"));
+        };
+        let Some(tracked) = snapshot.find(page_name) else {
+            return Err(RenderError::new(
+                ErrorKind::UnknownPage,
+                format!("unknown page name '{page_name}'"),
+            ));
+        };
+        let mut info = tracked.clone();
+        if let Some(title) = context.title() {
+            info.title = title.to_string();
+        }
+        let mut identity = crate::host::RenderIdentity::new()
+            .name(info.name.clone())
+            .title(info.title.clone());
+        if !info.template_path.is_empty() {
+            identity = identity.template_path(info.template_path.clone());
+        }
+        let host = crate::project_host::ProjectHost::new(
+            snapshot,
+            &self.defaults,
+            context,
+            self.environment_provider.as_deref(),
+        );
+        let mut result = crate::parser::render_tracked(&host, &identity, info.paginate.as_ref())?;
+        for dependency in host.recorded_dependencies() {
+            result.dependencies.insert(dependency);
+        }
+        Ok(result)
     }
 
     /// Render a page composed into a template (the template must execute

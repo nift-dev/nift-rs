@@ -113,6 +113,13 @@ pub trait RenderHost {
         None
     }
 
+    /// Record project dependencies discovered during value resolution (NR8).
+    /// A project-aware host that resolves project-backed values (contracts)
+    /// reports the root-relative paths it read so the render result carries the
+    /// project dependency set. Standalone hosts have no project-backed values
+    /// and ignore this.
+    fn record_dependencies(&self, _paths: &[String]) {}
+
     /// Whether a render currently has an output location (NR5). The default is
     /// conservative: no output context unless a Host explicitly provides one.
     /// Standalone hosts report whether the caller supplied

@@ -361,8 +361,9 @@ fn generic_string(path: &Path) -> String {
     }
 }
 
-/// `fs::path::lexically_relative()`: the relative path from `base` to `path`,
-/// empty when equal, `..`-prefixed when outside.
+/// `fs::path::lexically_relative()`: the relative path from `base` to `path`.
+/// Returns `.` when the paths are equivalent (the C++ reference returns `.`,
+/// not an empty path, for equal paths), `..`-prefixed when outside.
 fn lexical_relative(path: &Path, base: &Path) -> PathBuf {
     let path_comps: Vec<Component<'_>> = path.components().collect();
     let base_comps: Vec<Component<'_>> = base.components().collect();
@@ -379,6 +380,9 @@ fn lexical_relative(path: &Path, base: &Path) -> PathBuf {
     }
     for component in &path_comps[common..] {
         out.push(component.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
     }
     out
 }
@@ -486,12 +490,11 @@ fn path_within(base: &Path, candidate: &Path) -> bool {
     let normalized_base = absolute_normalized(base);
     let normalized_candidate = absolute_normalized(candidate);
 
+    // Reject obvious lexical escapes first. (lexically_relative returns "." for
+    // equal paths, so only the ".." prefix can reject here, exactly like the
+    // C++ reference.)
     let lexical = lexical_relative(&normalized_candidate, &normalized_base);
-    if lexical.as_os_str().is_empty() {
-        if normalized_candidate != normalized_base {
-            return false;
-        }
-    } else if lexical.components().next() == Some(Component::ParentDir) {
+    if lexical.components().next() == Some(Component::ParentDir) {
         return false;
     }
 
@@ -573,13 +576,10 @@ fn pagination_output_path_of(
 }
 
 fn relative_of(root: &Path, path: &Path) -> String {
-    let normalized = lexically_normal(path);
-    let relative = lexical_relative(&normalized, root);
-    if relative.as_os_str().is_empty() {
-        generic_string(&normalized)
-    } else {
-        generic_string(&relative)
-    }
+    // The reference returns lexically_relative(path, root).generic_string();
+    // lexically_relative yields "." for a path equal to the root (probed C++
+    // behavior), so the root itself spells as ".".
+    generic_string(&lexical_relative(&lexically_normal(path), root))
 }
 
 // ---------------------------------------------------------------------------

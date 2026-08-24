@@ -31,6 +31,7 @@ pub mod host;
 pub mod hosts;
 pub mod parser;
 pub mod project;
+pub mod project_host;
 pub mod result;
 pub mod source;
 pub mod value;
@@ -41,7 +42,7 @@ pub use engine::Engine;
 pub use error::{BindingError, ErrorKind, RenderError};
 pub use host::{RenderHost, RenderIdentity};
 pub use hosts::{FilesystemHost, InMemoryHost};
-pub use parser::render;
+pub use parser::{render, render_tracked};
 pub use project::{
     mapped_name, ProjectConfig, ProjectError, ProjectErrorKind, ProjectState, TrackedInfo,
 };
