@@ -502,6 +502,34 @@ fn parse(
         if text[i..].starts_with("$[") {
             if let Some(end) = scan_brackets(text, i + 2) {
                 let key = &text[i + 2..end];
+                // Ternary expressions resolve before the ordinary expression
+                // path (reference split_ternary).
+                match split_ternary(key) {
+                    Ok(Some(parts)) => {
+                        let rendered = render_ternary(
+                            state,
+                            host,
+                            identity,
+                            page,
+                            &parts,
+                            source_path,
+                            depth,
+                        )?;
+                        output += &rendered;
+                        i = end + 1;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(()) => {
+                        return Err(error_at(
+                            ErrorKind::Parse,
+                            "ternary expression has '?' without a matching ':'",
+                            text,
+                            i,
+                            source_path,
+                        ));
+                    }
+                }
                 match crate::expr::evaluate_expression(
                     &state.json_bindings,
                     host,
@@ -696,7 +724,17 @@ fn parse(
                 &collection_expression,
                 pagination.as_ref(),
             )
-            .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
+            .map_err(|e| {
+                // Reference wraps @for collection failures with the directive
+                // context.
+                error_at(
+                    ErrorKind::Render,
+                    format!("@for collection: {}", e.message),
+                    text,
+                    i,
+                    source_path,
+                )
+            })?;
 
             let body = normalize_control_block_body(&text[block_open + 1..block_close]);
             let body_multiline = body.multiline;
@@ -2026,12 +2064,15 @@ fn parse(
             }
 
             // Unknown function (or a not-yet-implemented one): literal.
-
-            // Unknown function (or a not-yet-implemented one): literal.
         }
 
-        output.push(bytes[i] as char);
-        i += 1;
+        // Literal fallback. Advance by a full UTF-8 character: a byte-wise
+        // advance would corrupt multi-byte characters and land `i` mid-char,
+        // panicking on later `text[i..]` slicing (found by the NR10 unicode
+        // differential case).
+        let ch = text[i..].chars().next().unwrap();
+        output.push(ch);
+        i += ch.len_utf8();
     }
 
     Ok(output)
@@ -2449,6 +2490,196 @@ pub(crate) fn find_balanced(
     None
 }
 
+/// A `$[...]` ternary split, mirroring the reference `split_ternary`.
+struct TernaryParts<'a> {
+    condition: &'a str,
+    when_true: &'a str,
+    when_false: &'a str,
+}
+
+/// Split a `$[...]` key into a ternary. `Ok(Some)` when a top-level `?` is
+/// present (with a matching `:` or, when the condition is non-empty, an
+/// implicit empty false branch); `Err(())` for a malformed `?` with an empty
+/// condition and no `:`; `Ok(None)` when there is no ternary.
+fn split_ternary(expression: &str) -> Result<Option<TernaryParts<'_>>, ()> {
+    let bytes = expression.as_bytes();
+    let mut quoted = false;
+    let mut quote = 0u8;
+    let mut parens = 0;
+    let mut brackets = 0;
+    let mut braces = 0;
+    let mut question: Option<usize> = None;
+    let mut nested = 0;
+    let mut i = 0;
+    while i < expression.len() {
+        let c = bytes[i];
+        if quoted {
+            if c == b'\\' && i + 1 < expression.len() {
+                i += 1;
+            } else if c == quote {
+                quoted = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            quoted = true;
+            quote = c;
+            i += 1;
+            continue;
+        }
+        if c == b'(' {
+            parens += 1;
+            i += 1;
+            continue;
+        }
+        if c == b')' {
+            if parens > 0 {
+                parens -= 1;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'[' {
+            brackets += 1;
+            i += 1;
+            continue;
+        }
+        if c == b']' {
+            if brackets > 0 {
+                brackets -= 1;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'{' {
+            braces += 1;
+            i += 1;
+            continue;
+        }
+        if c == b'}' {
+            if braces > 0 {
+                braces -= 1;
+            }
+            i += 1;
+            continue;
+        }
+        if parens > 0 || brackets > 0 || braces > 0 {
+            i += 1;
+            continue;
+        }
+        if c == b'?' {
+            if question.is_none() {
+                question = Some(i);
+            } else {
+                nested += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(q) = question {
+            if c == b':' {
+                if nested > 0 {
+                    nested -= 1;
+                    i += 1;
+                    continue;
+                }
+                return Ok(Some(TernaryParts {
+                    condition: expression[..q].trim(),
+                    when_true: &expression[q + 1..i],
+                    when_false: &expression[i + 1..],
+                }));
+            }
+        }
+        i += 1;
+    }
+    if let Some(q) = question {
+        let condition = expression[..q].trim();
+        if condition.is_empty() {
+            return Err(());
+        }
+        return Ok(Some(TernaryParts {
+            condition,
+            when_true: &expression[q + 1..],
+            when_false: "",
+        }));
+    }
+    Ok(None)
+}
+
+/// A quoted string literal (`'...'` or `"..."`) with the reference escape set;
+/// `None` when the text is not a quoted string.
+fn quoted_string_literal(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 2 {
+        return None;
+    }
+    let quote = bytes[0];
+    if (quote != b'\'' && quote != b'"') || bytes[bytes.len() - 1] != quote {
+        return None;
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut result = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('r') => result.push('\r'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('\'') => result.push('\''),
+                Some(other) => result.push(other),
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    Some(result)
+}
+
+/// Renders a `$[...]` ternary branch (reference Parser `$[` ternary path):
+/// the condition is a hard-evaluated boolean expression, the selected branch is
+/// a quoted string literal (emitted as its value) or lazy Nift source (parsed
+/// so a branch can contain directives such as `@input`).
+fn render_ternary(
+    state: &mut RenderState,
+    host: &dyn RenderHost,
+    identity: &RenderIdentity,
+    page: Option<&Source>,
+    parts: &TernaryParts<'_>,
+    source_path: &Path,
+    depth: usize,
+) -> Result<String, RenderError> {
+    let condition_value = crate::expr::evaluate_expression(
+        &state.json_bindings,
+        host,
+        identity,
+        parts.condition,
+        state.pagination_view().as_ref(),
+    )?;
+    let selected = if truthy(&condition_value) {
+        parts.when_true
+    } else {
+        parts.when_false
+    };
+    if let Some(literal) = quoted_string_literal(selected.trim()) {
+        return Ok(literal);
+    }
+    parse(
+        state,
+        host,
+        identity,
+        page,
+        selected,
+        source_path,
+        depth + 1,
+    )
+}
+
 /// Scans from `start` to the matching `]`, honouring nested brackets and
 /// quoted strings.
 fn scan_brackets(text: &str, start: usize) -> Option<usize> {
@@ -2530,7 +2761,9 @@ fn append_indented(output: &mut String, text: &str, indent: &str, initial_code_b
             }
             segment_start = i + 1;
         }
-        i += 1;
+        // Advance by a full UTF-8 character (a byte-wise advance lands mid-char
+        // on multi-byte text, panicking on later `text[i..]` slicing).
+        i += text[i..].chars().next().unwrap().len_utf8();
     }
     if segment_start < size {
         output.push_str(&text[segment_start..size]);
@@ -2725,7 +2958,11 @@ fn parse_for_collection_clause(clause: &str) -> Result<(String, String, bool), R
             b']' if brackets > 0 => brackets -= 1,
             _ => {}
         }
-        if parens == 0 && brackets == 0 && clause[i..].starts_with(" by ") {
+        if parens == 0
+            && brackets == 0
+            && clause.is_char_boundary(i)
+            && clause[i..].starts_with(" by ")
+        {
             let collection = clause[..i].trim().to_string();
             let tail = &clause[i + 4..];
             let space = tail.rfind([' ', '\t']);

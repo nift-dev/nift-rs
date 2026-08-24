@@ -1,0 +1,83 @@
+name: NR10 differential
+
+# NR10 gate: zero unexplained divergence across implementations and platforms.
+# Checks out nift-rs and the frozen nift-embed reference, builds both Engine
+# harnesses, and runs the expanded behavioural differential corpus plus the
+# full Rust battery on Linux, macOS and Windows. The canonical project-parity
+# corpus (CLI vs C++ Engine vs golden vs Rust Engine) is gated on the C++ side
+# by nift-embed's conformance workflow; this workflow adds the behavioural
+# differential corpus and the platform matrix for the Rust side.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    name: ${{ matrix.id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux
+            runner: ubuntu-latest
+          - id: macos
+            runner: macos-latest
+          - id: windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: nift-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: nift-dev/nift-embed
+          path: nift-embed
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: UCRT64
+          update: true
+          install: make mingw-w64-ucrt-x86_64-gcc
+      - name: Build nift-embed objects (C++ reference harness)
+        shell: bash
+        run: |
+          cd nift-embed
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="/c/msys64/ucrt64/bin:$PATH"
+          fi
+          make -j2
+          g++ -Isrc -Iinclude -Iminifypp/include -Iminifypp/src -std=c++17 -O1 -g \
+            tests/engine_harness.cpp \
+            src/Engine.o src/Context.o src/Value.o src/FileSystem.o src/JsonFile.o \
+            src/JsonSchema.o minifypp/src/Minify.o src/Parser.o src/ProjectInfo.o \
+            src/ProjectRead.o src/ProjectState.o src/WatchList.o src/BuildProgress.o \
+            -pthread -o .build/engine-harness
+      - name: Build Rust harness
+        shell: bash
+        run: |
+          cd nift-rs
+          cargo build -p nift --example engine_harness
+      - name: Run expanded behavioural differential corpus
+        shell: bash
+        env:
+          NIFT_CPP_HARNESS: ${{ runner.os == 'Windows' && '$GITHUB_WORKSPACE/nift-embed/.build/engine-harness.exe' || '$GITHUB_WORKSPACE/nift-embed/.build/engine-harness' }}
+        run: |
+          cd nift-rs
+          NIFT_CPP_HARNESS="$NIFT_CPP_HARNESS" cargo test -p nift --test nr10_differential -- --nocapture
+      - name: Rust battery (format, clippy, tests, corpus, unsafe)
+        shell: bash
+        run: |
+          cd nift-rs
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+          bash corpus/sync_corpus.sh verify

@@ -101,9 +101,15 @@ fn main() {
             continue;
         }
         if let Some(eq) = line.find('=') {
-            engine
-                .set(line[..eq].to_string(), line[eq + 1..].to_string())
-                .ok();
+            let name = line[..eq].to_string();
+            let value = line[eq + 1..].to_string();
+            // A "json:" prefix binds a JSON value instead of a string, so the
+            // differential can exercise arrays/objects/numbers/bools (NR10).
+            if let Some(rest) = value.strip_prefix("json:") {
+                engine.set_json(name, rest).ok();
+            } else {
+                engine.set(name, value).ok();
+            }
         }
     }
 

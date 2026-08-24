@@ -574,7 +574,7 @@ fn scalar_ordering(left: &Value, right: &Value) -> Result<i32, RenderError> {
         }),
         _ => Err(RenderError::new(
             ErrorKind::Render,
-            "ordering comparisons require two numbers or two strings of the same type",
+            "@if ordering comparisons require two numbers or two strings of the same type",
         )),
     }
 }
