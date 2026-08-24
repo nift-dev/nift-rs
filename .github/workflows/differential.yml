@@ -68,11 +68,20 @@ jobs:
           cargo build -p nift --example engine_harness
       - name: Run expanded behavioural differential corpus
         shell: bash
-        env:
-          NIFT_CPP_HARNESS: ${{ runner.os == 'Windows' && '$GITHUB_WORKSPACE/nift-embed/.build/engine-harness.exe' || '$GITHUB_WORKSPACE/nift-embed/.build/engine-harness' }}
         run: |
+          # Construct the C++ harness path in the shell where GITHUB_WORKSPACE
+          # actually expands (an env var set from a GitHub expression would
+          # carry the literal '$GITHUB_WORKSPACE/...' text instead).
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            CPP_HARNESS="$GITHUB_WORKSPACE/nift-embed/.build/engine-harness.exe"
+          else
+            CPP_HARNESS="$GITHUB_WORKSPACE/nift-embed/.build/engine-harness"
+          fi
+          # The NR10 differential must never silently become a Rust-only green
+          # because the reference harness is missing.
+          test -f "$CPP_HARNESS"
           cd nift-rs
-          NIFT_CPP_HARNESS="$NIFT_CPP_HARNESS" cargo test -p nift --test nr10_differential -- --nocapture
+          NIFT_CPP_HARNESS="$CPP_HARNESS" cargo test -p nift --test nr10_differential -- --nocapture
       - name: Rust battery (format, clippy, tests, corpus, unsafe)
         shell: bash
         run: |
