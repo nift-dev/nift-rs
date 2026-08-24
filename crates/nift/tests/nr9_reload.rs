@@ -11,8 +11,9 @@ use nift::context::Context;
 use nift::Engine;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Barrier;
 
 fn fixture(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -34,6 +35,22 @@ fn write_file(path: &Path, contents: &str) {
 fn write_file_atomic(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+/// Atomic replace with a per-write unique temporary name, safe when several
+/// threads publish candidate files concurrently (no shared `.tmp` path).
+fn write_file_atomic_unique(path: &Path, contents: &str) {
+    static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file"),
+        TMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
     std::fs::write(&tmp, contents).unwrap();
     std::fs::rename(&tmp, path).unwrap();
 }
@@ -374,4 +391,83 @@ fn defaults_survive_reload() {
     let result = engine.render_page("about", &Context::new()).unwrap();
     assert!(result.output.contains("Kept"), "{}", result.output);
     assert!(result.output.contains("KeptEnv"), "{}", result.output);
+}
+
+#[test]
+fn concurrent_reload_and_reload() {
+    let root = fixture("concurrent-reloads");
+    write_project(&root); // open on generation Title-ALPHA
+    let engine = Arc::new(Engine::open(&root).unwrap());
+    assert!(engine.is_open());
+
+    // Two reload workers on the SAME Engine. Candidates may build concurrently;
+    // publication is serialized by the Engine's publication lock and the last
+    // successful candidate to acquire it wins (no "newest invocation" or
+    // timestamp ordering is imposed). Successful candidates only ever publish a
+    // fully validated ProjectState generation.
+    const WORKERS: usize = 2;
+    const RELOADS: usize = 250;
+
+    let barrier = Arc::new(Barrier::new(WORKERS));
+    let mut workers = Vec::new();
+    for w in 0..WORKERS {
+        let engine = Arc::clone(&engine);
+        let barrier = Arc::clone(&barrier);
+        let root = root.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            for i in 0..RELOADS {
+                // Mix one invalid candidate every five iterations. Which reload
+                // observes the invalid file is racy (the other worker may have
+                // republished a valid one), so no success/failure count is
+                // asserted; the point is that concurrent reloads never
+                // deadlock, panic, or publish a torn generation, and a failed
+                // candidate can never erase a successfully published one.
+                if (i + w) % 5 == 4 {
+                    write_file_atomic_unique(&root.join(".nift/tracked.json"), "{ not json");
+                } else {
+                    write_file_atomic_unique(
+                        &root.join(".nift/tracked.json"),
+                        &tracked_with_title(if (i + w) % 2 == 0 {
+                            "Title-BETA"
+                        } else {
+                            "Title-ALPHA"
+                        }),
+                    );
+                }
+                let _ = engine.reload();
+            }
+        }));
+    }
+    for worker in workers {
+        // Joining proves neither worker deadlocked or panicked.
+        worker.join().unwrap();
+    }
+
+    // The Engine is still serving one complete, valid generation.
+    assert!(engine.is_open());
+    assert!(engine.render_page("about", &Context::new()).is_ok());
+
+    // Deterministic recovery: publish a known-good tracked.json, reload, and
+    // confirm the rendered result corresponds to one complete valid generation.
+    write_file_atomic(
+        &root.join(".nift/tracked.json"),
+        &tracked_with_title("Title-FINAL"),
+    );
+    engine
+        .reload()
+        .expect("deterministic reload after the workers");
+    assert!(engine.is_open());
+    let result = engine.render_page("about", &Context::new()).unwrap();
+    assert!(
+        result.output.contains("<h1>About</h1>"),
+        "{}",
+        result.output
+    );
+    assert!(result.output.contains("Title-FINAL"), "{}", result.output);
+
+    // Zero project writes: no .info.json anywhere.
+    for path in tree_snapshot(&root).keys() {
+        assert!(!path.contains(".info.json"), "engine wrote {path}");
+    }
 }
