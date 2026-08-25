@@ -128,3 +128,198 @@ fn concurrent_paginated_attribution() {
         assert!(b.output.contains("ok"), "{}", b.output);
     }
 }
+
+// --- Pagination separator host-error semantics -----------------------------
+
+use nift::error::{ErrorKind, RenderError};
+use nift::host::{RenderHost, RenderIdentity};
+use nift::parser::render_tracked;
+use nift::project::{PaginationConfig, ProjectState};
+use nift::value::Value;
+use std::borrow::Cow;
+
+#[derive(Clone)]
+enum SeparatorOutcome {
+    Error(&'static str),
+    NotFound,
+    FoundEmpty,
+}
+
+struct SeparatorProbeHost<'a> {
+    state: &'a ProjectState,
+    outcome: SeparatorOutcome,
+}
+
+impl<'a> RenderHost for SeparatorProbeHost<'a> {
+    fn binding(&self, _name: &str) -> Option<&Value> {
+        None
+    }
+    fn root(&self) -> &std::path::Path {
+        self.state.root()
+    }
+    fn relative(&self, path: &std::path::Path) -> String {
+        self.state.relative(path)
+    }
+    fn content_path(&self, identity: &RenderIdentity) -> std::path::PathBuf {
+        let config = self.state.config();
+        match &identity.name {
+            Some(name) => match self.state.find(name) {
+                Some(info) => self.state.content_path(info),
+                None => self
+                    .state
+                    .root()
+                    .join(&config.content_dir)
+                    .join(format!("{}{}", name, config.content_ext)),
+            },
+            None => self.state.root().join(&config.content_dir),
+        }
+    }
+    fn output_path(&self, identity: &RenderIdentity) -> std::path::PathBuf {
+        let config = self.state.config();
+        match &identity.name {
+            Some(name) => match self.state.find(name) {
+                Some(info) => self.state.output_path(info),
+                None => self
+                    .state
+                    .root()
+                    .join(&config.output_dir)
+                    .join(format!("{}{}", name, config.output_ext)),
+            },
+            None => self.state.root().join(&config.output_dir),
+        }
+    }
+    fn source_exists(&self, path: &std::path::Path) -> bool {
+        self.is_separator(path) || self.state.read_shared_source(path).is_some()
+    }
+    fn source_readable(&self, path: &std::path::Path) -> bool {
+        self.is_separator(path) || self.state.read_shared_source(path).is_some()
+    }
+    fn read_source(&self, path: &std::path::Path) -> Result<Cow<'_, str>, RenderError> {
+        let is_separator = self.is_separator(path);
+        if is_separator {
+            return match &self.outcome {
+                SeparatorOutcome::Error(message) => {
+                    Err(RenderError::new(ErrorKind::Render, message.to_string()))
+                }
+                SeparatorOutcome::FoundEmpty => Ok(Cow::Owned(String::new())),
+                SeparatorOutcome::NotFound => Err(RenderError::new(
+                    ErrorKind::MissingSource,
+                    "separator missing",
+                )),
+            };
+        }
+        match self.state.read_shared_source(path) {
+            Some(source) => Ok(Cow::Owned(source.to_string())),
+            None => Err(RenderError::new(
+                ErrorKind::MissingSource,
+                format!("source file is not readable: {}", path.display()),
+            )),
+        }
+    }
+}
+
+impl SeparatorProbeHost<'_> {
+    fn is_separator(&self, path: &std::path::Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.contains(".separator.html"))
+            .unwrap_or(false)
+    }
+}
+
+fn separator_project(root: &Path) -> ProjectState {
+    write_file(
+        &root.join(".nift/config.json"),
+        r#"{"config":{"content-dir":"content/","output-dir":"public/","default-template":"templates/template.html","build-threads":1,"incremental-mode":"modified"}}"#,
+    );
+    write_file(
+        &root.join(".nift/tracked.json"),
+        r#"{"tracked":[{"name":"blog","title":"Blog","template":"templates/template.html","paginate":{"items-per-page":1}}]}"#,
+    );
+    write_file(&root.join("templates/template.html"), "<main>$[title]</main>\n@content");
+    write_file(&root.join("content/blog.html"), "@item{one}@item{two}@paginate");
+    write_file(
+        &root.join("content/blog.paginate.html"),
+        "<section>$[paginate.items]-$[paginate.current]/$[paginate.total]</section>",
+    );
+    write_file(&root.join("content/blog.separator.html"), "--sep--");
+    ProjectState::open(root).expect("open project")
+}
+
+fn render_with_host(state: &ProjectState, outcome: SeparatorOutcome) -> Result<nift::result::RenderResult, nift::RenderError> {
+    let info = state.find("blog").expect("blog tracked");
+    let identity = RenderIdentity {
+        name: Some(info.name.clone()),
+        title: Some(info.title.clone()),
+        template_path: if info.template_path.is_empty() {
+            None
+        } else {
+            Some(info.template_path.clone())
+        },
+    };
+    let paginate = PaginationConfig {
+        items_per_page: info.paginate.as_ref().map(|p| p.items_per_page).unwrap_or(1),
+        template_path: None,
+        separator_path: None,
+    };
+    let host = SeparatorProbeHost { state, outcome };
+    render_tracked(&host, &identity, Some(&paginate))
+}
+
+#[test]
+fn pagination_separator_host_error_semantics() {
+    let root = temp_dir("separator");
+    let state = separator_project(&root);
+
+    // Error -> render fails with the host diagnostic (Error != NotFound).
+    let failed = render_with_host(&state, SeparatorOutcome::Error("separator backend failed"));
+    let failed_message = failed.unwrap_err().message;
+    assert!(
+        failed_message.contains("separator backend failed"),
+        "{failed_message}"
+    );
+
+    // NotFound -> no separator; render succeeds without "--sep--".
+    let no_sep = render_with_host(&state, SeparatorOutcome::NotFound).expect("render");
+    assert!(!no_sep.output.contains("--sep--"));
+
+    // Found empty -> valid empty separator; render succeeds.
+    let empty_sep = render_with_host(&state, SeparatorOutcome::FoundEmpty).expect("render");
+    assert!(!empty_sep.output.contains("--sep--"));
+}
+
+#[test]
+fn pagination_error_selection_is_page_order() {
+    let root = temp_dir("order");
+    write_file(
+        &root.join(".nift/config.json"),
+        r#"{"config":{"content-dir":"content/","output-dir":"public/","default-template":"templates/template.html","build-threads":1,"incremental-mode":"modified"}}"#,
+    );
+    write_file(
+        &root.join(".nift/tracked.json"),
+        r#"{"tracked":[{"name":"blog","title":"Blog","template":"templates/template.html","paginate":{"items-per-page":1}}]}"#,
+    );
+    write_file(&root.join("templates/template.html"), "<main>$[title]</main>\n@content");
+    write_file(&root.join("content/blog.html"), "@item{one}@item{two}@paginate");
+    write_file(
+        &root.join("content/blog.paginate.html"),
+        "<section>@getenv(FAIL) $[paginate.current]</section>",
+    );
+
+    let mut engine = Engine::project(&root);
+    assert!(engine.is_open());
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    engine.set_environment_provider_result(move |_| {
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            HostResult::Error("error-one".to_string())
+        } else {
+            HostResult::Error("error-two".to_string())
+        }
+    });
+    let result = engine.render_page("blog", &Context::new());
+    assert!(result.is_err());
+    let message = result.unwrap_err().message;
+    assert!(message.contains("error-one"), "{message}");
+    assert!(!message.contains("error-two"), "{message}");
+}

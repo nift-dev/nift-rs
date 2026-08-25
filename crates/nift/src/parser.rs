@@ -107,10 +107,14 @@ pub fn render_tracked(
             ));
         }
         let content_source = host.read_source(&content_path).map_err(|e| {
-            RenderError::new(
-                e.kind,
-                format!("content file is not readable: {}", content_path.display()),
-            )
+            if e.kind == ErrorKind::MissingSource {
+                RenderError::new(
+                    e.kind,
+                    format!("content file is not readable: {}", content_path.display()),
+                )
+            } else {
+                e
+            }
         })?;
         state
             .input_stack
@@ -142,10 +146,14 @@ pub fn render_tracked(
             ));
         }
         let template_source = host.read_source(&template_path).map_err(|e| {
-            RenderError::new(
-                e.kind,
-                format!("template file is not readable: {}", template_path.display()),
-            )
+            if e.kind == ErrorKind::MissingSource {
+                RenderError::new(
+                    e.kind,
+                    format!("template file is not readable: {}", template_path.display()),
+                )
+            } else {
+                e
+            }
         })?;
         state.dependencies.insert(host.relative(&template_path));
         state
@@ -276,12 +284,23 @@ fn assemble_pagination_pages(
             .len()
             .div_ceil(pagination.items_per_page),
     );
+    // The separator is OPTIONAL only in its absence: a MissingSource read
+    // (NotFound) means "no separator", but a host ERROR must fail the render
+    // with its diagnostic (Error != NotFound). Found with an empty value is a
+    // valid empty separator.
     let separator_source = if separator.as_os_str().is_empty() {
         None
     } else {
-        host.read_source(&separator)
-            .ok()
-            .map(|cow| cow.into_owned())
+        match host.read_source(&separator) {
+            Ok(cow) => Some(cow.into_owned()),
+            Err(error) if error.kind == ErrorKind::MissingSource => None,
+            Err(error) => {
+                return Err(RenderError::new(
+                    ErrorKind::Render,
+                    format!("pagination separator: {}", error.message),
+                ))
+            }
+        }
     };
     let page_source = host.read_source(&pagination_template).map_err(|_| {
         RenderError::new(
@@ -1461,7 +1480,7 @@ fn parse(
                 }
                 let (content_text, content_identity) = match resolve_source(host, page) {
                     Ok(pair) => pair,
-                    Err(_) if matches!(page, Source::Path(_)) => {
+                    Err(e) if matches!(page, Source::Path(_)) && e.kind == ErrorKind::MissingSource => {
                         // Reference message for a missing/unreadable content
                         // page (the corpus missing-source reject class).
                         return Err(error_at(

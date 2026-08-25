@@ -101,6 +101,15 @@ fn main() {
             }
         });
     }
+    // Host-error seams (CP10.3): the provider returns a controlled host
+    // failure so the render fails with the diagnostic, identically on the
+    // caller thread and pagination workers.
+    if seam == "env-error" {
+        engine.set_environment_provider_result(|_| nift::host::HostResult::Error("host callback failed".to_string()));
+    }
+    if seam == "loader-error" {
+        engine.set_loader_result(|_| nift::host::HostResult::Error("host callback failed".to_string()));
+    }
     for line in io::stdin().lock().lines() {
         let line = line.expect("stdin line");
         if line.is_empty() {
