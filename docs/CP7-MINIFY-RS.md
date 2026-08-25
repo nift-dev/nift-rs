@@ -109,11 +109,13 @@ per format. Properties checked on every generated input (28,000 total):
 - second-pass acceptance and idempotence (minify(minify(x)) == minify(x))
   for every successful minification.
 
-The campaign immediately found a real bug: escaped characters inside quoted
-HTML tag attributes were duplicated (`\w` -> `\ww`) because the Rust `for k`
-loop could not advance past the escaped char like the reference `++k`.
-Converted to a `while k` loop. Campaign now: 28,000 inputs, 0 panics,
-0 non-idempotent.
+The campaign found two real bugs: escaped characters inside quoted HTML tag
+attributes were duplicated (`\w` -> `\ww`) because the Rust `for k` loop could
+not advance past the escaped char like the reference `++k` (converted to a
+`while k` loop); and it now enforces SECOND-PASS ACCEPTANCE as a hard property
+(a successful first pass whose output the minifier then rejects is a failure).
+Final: 28,000 inputs, first-pass OK 15,906, panics 0, second-pass rejections 0,
+non-idempotent 0.
 
 ### Semantic oracle (original semantics == minified semantics)
 

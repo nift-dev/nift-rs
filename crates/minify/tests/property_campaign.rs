@@ -90,8 +90,9 @@ fn deterministic_mutation_campaign_no_panic_idempotent() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let mut generated = 0usize;
     let mut ok_count = 0usize;
-    let mut non_idempotent = 0usize;
     let mut panic_count = 0usize;
+    let mut second_pass_rejections = 0usize;
+    let mut non_idempotent = 0usize;
     for (index, (format, seed)) in SEEDS.iter().enumerate() {
         let mut local = Rng(0x5DEECE66D ^ (0x9E3779B97F4A7C15u64.wrapping_add(index as u64 * 0x9E37_79B9 + 1)));
         for _ in 0..MUTATIONS_PER_SEED {
@@ -109,14 +110,26 @@ fn deterministic_mutation_campaign_no_panic_idempotent() {
                     // Determinism: same input twice -> same result.
                     let again = minify(*format, &input).unwrap();
                     assert_eq!(out, again, "nondeterministic output for {format:?}");
-                    // Second-pass acceptance + idempotence.
-                    if let Ok(second) = minify(*format, &out) {
-                        if second != out {
-                            non_idempotent += 1;
-                            if non_idempotent <= 5 {
+                    // SECOND-PASS ACCEPTANCE is a hard property: a successful
+                    // first pass whose output the same minifier then REJECTS is
+                    // itself a failure. Then require idempotence.
+                    match minify(*format, &out) {
+                        Err(_) => {
+                            second_pass_rejections += 1;
+                            if second_pass_rejections <= 5 {
                                 eprintln!(
-                                    "non-idempotent [{format:?}]: input={input:?} once={out:?} twice={second:?}"
+                                    "second-pass rejection [{format:?}]: input={input:?} once={out:?}"
                                 );
+                            }
+                        }
+                        Ok(second) => {
+                            if second != out {
+                                non_idempotent += 1;
+                                if non_idempotent <= 5 {
+                                    eprintln!(
+                                        "non-idempotent [{format:?}]: input={input:?} once={out:?} twice={second:?}"
+                                    );
+                                }
                             }
                         }
                     }
@@ -126,14 +139,15 @@ fn deterministic_mutation_campaign_no_panic_idempotent() {
         }
     }
     println!(
-        "property campaign: {generated} generated inputs across {} formats; {ok_count} minified OK; \
-         {panic_count} panics; {non_idempotent} non-idempotent",
+        "property campaign: {generated} generated inputs across {} formats; first-pass OK {ok_count}; \
+         panics {panic_count}; second-pass rejections {second_pass_rejections}; non-idempotent {non_idempotent}",
         SEEDS.len()
     );
     assert_eq!(panic_count, 0, "minify-rs must never panic");
-    // Idempotence should hold for the overwhelming majority (the reference
-    // contract); a small allowance for pathological generated inputs is not
-    // granted - assert exact idempotence over successful outputs.
+    assert_eq!(
+        second_pass_rejections, 0,
+        "a successful first pass must never be rejected on pass two"
+    );
     assert_eq!(non_idempotent, 0, "minify(minify(x)) must equal minify(x)");
     assert!(generated >= 20_000, "campaign must be substantial");
 }
