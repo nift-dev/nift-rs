@@ -4,7 +4,7 @@
 //! tests/nr6_differential.sh against the C++ harness built from nift-embed.
 
 use nift::context::Context;
-use nift::{Engine, Source};
+use nift::{Engine, Source, Value};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
@@ -110,25 +110,46 @@ fn main() {
     if seam == "loader-error" {
         engine.set_loader_result(|_| nift::host::HostResult::Error("host exploded".to_string()));
     }
+    let mut context = Context::new();
     for line in io::stdin().lock().lines() {
         let line = line.expect("stdin line");
         if line.is_empty() {
             continue;
         }
+        // A "@ctx " prefix binds the pair on the render Context instead of the
+        // Engine, exercising the context-over-engine precedence contract.
+        let on_context = line.strip_prefix("@ctx ");
+        let line = on_context.unwrap_or(&line);
         if let Some(eq) = line.find('=') {
             let name = line[..eq].to_string();
             let value = line[eq + 1..].to_string();
             // A "json:" prefix binds a JSON value instead of a string, so the
             // differential can exercise arrays/objects/numbers/bools (NR10).
-            if let Some(rest) = value.strip_prefix("json:") {
-                engine.set_json(name, rest).ok();
+            let failed = if let Some(rest) = value.strip_prefix("json:") {
+                if on_context.is_some() {
+                    match nift::json::parse_json(rest) {
+                        Ok(parsed) => context.set(name.clone(), parsed).is_err(),
+                        Err(_) => true,
+                    }
+                } else {
+                    engine.set_json(name.clone(), rest).is_err()
+                }
             } else {
-                engine.set(name, value).ok();
+                match on_context {
+                    Some(_) => context.set(name.clone(), Value::from(value)).is_err(),
+                    None => engine.set(name.clone(), Value::from(value)).is_err(),
+                }
+            };
+            if failed {
+                println!(
+                    "{{\"ok\":false,\"error\":\"invalid binding name: {}\"}}",
+                    json_escape(&name)
+                );
+                return;
             }
         }
     }
 
-    let mut context = Context::new();
     if !page_name.is_empty() {
         context.set_page_name(&page_name);
     }
