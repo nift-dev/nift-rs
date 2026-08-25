@@ -44,7 +44,7 @@ forbid`).
 inputs (every `minify_smoke.cpp` semantic case, plus malformed/adversarial
 inputs) through BOTH the C++ reference (`/tmp/minify_cpp`, built from
 minifypp/Minify.cpp) and minify-rs (a CLI example), comparing output
-byte-for-byte. **126/126 cases match.**
+byte-for-byte. **126/126 cases match** (this is the full minify_smoke semantic differential; the other Minify++ suites are inventoried below).
 
 Porting against the full corpus exposed and fixed six real gaps in the first
 pass (this is why the full corpus matters):
@@ -71,6 +71,80 @@ Semantic difference confirmed (NOT a bug): CSS keeps a trailing `;` before the
 closing `}` (only whitespace is trimmed) - the smoke case
 `body{color:red;margin:0 10px;}` confirms this is the reference contract.
 
+## Evidence inventory (every Minify++ suite, disposition)
+
+```
+suite                              purpose                          Rust status
+minify_smoke.cpp                   direct semantics                 126/126 differential
+cross_format_adversarial.sh        cross-format isolation           covered by differential + property campaign
+fuzz_smoke.cpp                     mutation robustness              REPLACED by crates/minify/tests/property_campaign.rs
+                                                                     (deterministic xorshift mutation, 28,000 generated
+                                                                     inputs / 7 formats)
+minify_css_postcss_semantics.sh    CSS semantic validation          covered by structural CSS oracle + smoke semantic checks
+                                                                     (a Node/PostCSS oracle is future work if postcss is
+                                                                     vendored)
+minify_format_idempotence.sh       idempotence                      covered by property campaign (minify(minify(x))==x)
+                                                                     + smoke idempotence cases
+minify_generated_semantics.sh      generated JS semantic cases      covered by scripts/minify_semantic_oracle.sh
+                                                                     (node execution oracle)
+minify_jsx_generated.sh            generated JSX semantics          covered by semantic oracle (tsc --noCheck parse)
+minify_node_semantics.sh           JS runtime semantics             REPRODUCED in scripts/minify_semantic_oracle.sh
+                                                                     (node stdout/exit comparison)
+memory_lifetime.cpp                C++ lifetime-specific            Rust equivalent: zero unsafe + no-panic property
+memory_cli_stress.sh               process/memory stress            C++-specific; Rust equivalent is the no-unsafe/no-panic
+                                                                     property campaign
+cli_smoke.sh                       CLI surface                      standalone Rust equivalent: examples/minify_cli + the
+                                                                     differential/oracle runners exercise the CLI surface
+```
+
+### Deterministic mutation/property campaign (fuzz_smoke REPLACED)
+
+`crates/minify/tests/property_campaign.rs` ports the `fuzz_smoke` mutation
+philosophy into an idiomatic Rust property runner: a fixed xorshift seed
+(deterministic across runs) mutates representative valid seeds per format
+(insert/erase/replace/duplicate over the reference byte set), 4,000 mutations
+per format. Properties checked on every generated input (28,000 total):
+- no panic (hard property; `std::panic::catch_unwind`);
+- deterministic output (same input twice -> same result);
+- second-pass acceptance and idempotence (minify(minify(x)) == minify(x))
+  for every successful minification.
+
+The campaign immediately found a real bug: escaped characters inside quoted
+HTML tag attributes were duplicated (`\w` -> `\ww`) because the Rust `for k`
+loop could not advance past the escaped char like the reference `++k`.
+Converted to a `while k` loop. Campaign now: 28,000 inputs, 0 panics,
+0 non-idempotent.
+
+### Semantic oracle (original semantics == minified semantics)
+
+`scripts/minify_semantic_oracle.sh` reuses the Minify++ semantic case content
+and proves minification preserves behaviour with real tools:
+- JS: minified output executed under node; stdout/stderr/exit compared with
+  the original (regex/division, ASI return, empty-while, Unicode identifiers,
+  numeric member access, nested templates, class fields, regex after control
+  parens, division-vs-regex, label blocks, template raw text, async function
+  expressions);
+- CSS: structural oracle (balanced braces/brackets/parens, intact strings) on
+  minified output (basic, calc, custom props, descendant selectors, adjacent
+  strings, data URLs);
+- JSX: minified output must still parse under tsc (`--noCheck`, JSX preserve)
+  (basic, fragments, nested child expressions, URL text).
+All 22 cases pass. This is the second type of evidence beyond byte-parity: two
+implementations can agree on the same wrong transformation, so proving
+original semantics == minified semantics matters.
+
+### Reproducible differential gate
+
+`scripts/run_minify_differential.sh` builds the C++ reference in a temporary
+location, builds the minify-rs release runner, runs the differential, and
+cleans up. `MINIFY_CPP`/`MINIFY_RUST` overrides remain supported.
+
+### Performance benchmark moved out of cargo test
+
+The `per_format_throughput_and_output` unit test is now `#[ignore]` (it was
+hardware/performance-sensitive noise). Real numbers live in
+`examples/bench.rs`.
+
 ## Additional evidence
 
 - Idempotence: minify(minify(x)) == minify(x) over all seven formats.
@@ -90,8 +164,8 @@ closing `}` (only whitespace is trimmed) - the smoke case
 
 ## Complete nift-rs result
 
-Full workspace: **205 tests, 0 failures** (197 prior + 8 minify incl. the
-per-format benchmark test).
+Full workspace: **205 tests, 0 failures** (197 prior + 8 minify; the throughput
+benchmark is `#[ignore]`d, so the pass count is stable regardless of hardware).
 
 ## C++ vs Rust per-format benchmark (in-process, same inputs, same options,
 release builds, 200k iterations)

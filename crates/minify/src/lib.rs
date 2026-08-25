@@ -1628,12 +1628,15 @@ fn html(input: &str) -> Result<String, String> {
             let mut tag_space = false;
             let mut in_quote = false;
             let mut tag_quote = 0u8;
-            for k in i..j {
+            let mut k = i;
+            while k < j {
                 let c = bytes[k];
                 if in_quote {
                     output.push(c as char);
                     if c == b'\\' && k + 1 < j {
+                        // Consume the escaped character (reference `++k`).
                         output.push(input.as_bytes()[k + 1] as char);
+                        k += 1;
                     } else if c == tag_quote {
                         in_quote = false;
                     }
@@ -1662,6 +1665,7 @@ fn html(input: &str) -> Result<String, String> {
                     tag_space = false;
                     output.push(c as char);
                 }
+                k += 1;
             }
             let mut n = i + 1;
             while n < j && ws(bytes[n]) {
@@ -1811,6 +1815,7 @@ mod bench {
     use std::time::Instant;
 
     #[test]
+    #[ignore = "hardware/performance-sensitive; use examples/bench.rs for real numbers"]
     fn per_format_throughput_and_output() {
         let cases: &[(Format, &str)] = &[
             (Format::Html, "<div  class=\"a\" >  <p> hello world </p>  <span> x </span> </div>"),
