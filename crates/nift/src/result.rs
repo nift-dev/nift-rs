@@ -14,11 +14,26 @@
 use crate::error::RenderError;
 use std::collections::BTreeSet;
 
+/// One paginated page beyond the primary (CP8: complete pagination in the
+/// public Embed contract). `page` is the 1-based page number (>= 2) and
+/// `output` is that page's fully rendered content. Pages are ordered ascending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageOutput {
+    pub page: usize,
+    pub output: String,
+}
+
 /// The outcome of a successful render.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RenderResult {
-    /// The generated text.
+    /// The generated text. For a paginated render this is page 1; for a
+    /// non-paginated render it is the ordinary output.
     pub output: String,
+    /// Complete pagination result: pages 2..N in ascending page order. Empty
+    /// for a non-paginated render. Page numbers and content are rendering
+    /// semantics; output filenames/paths are a ProjectState/build concern and
+    /// are deliberately NOT exposed here.
+    pub pagination: Vec<PageOutput>,
     /// External inputs the renderer read, root-relative spellings, sorted and
     /// deduplicated.
     pub dependencies: BTreeSet<String>,
@@ -31,6 +46,7 @@ impl RenderResult {
     pub fn new(output: impl Into<String>) -> Self {
         RenderResult {
             output: output.into(),
+            pagination: Vec::new(),
             dependencies: BTreeSet::new(),
             requirements: BTreeSet::new(),
         }

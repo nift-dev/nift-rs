@@ -392,3 +392,81 @@ fn case_env_guard_parses_full_json_values_and_restores() {
     std::env::remove_var("WEIRD");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn pagination_renders_complete_page_set() {
+    let dir = std::env::temp_dir().join(format!("nift-pagination-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in [".nift", "content", "templates", "public"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    std::fs::write(
+        dir.join(".nift/config.json"),
+        r#"{"config":{"content-dir":"content/","output-dir":"public/","default-template":"templates/template.html","build-threads":-1,"incremental-mode":"modified"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".nift/tracked.json"),
+        r#"{"tracked":[{"name":"blog","title":"Blog","template":"templates/template.html","paginate":{"items-per-page":1}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("templates/template.html"), "<main>$[title]</main>\n@content\n").unwrap();
+    std::fs::write(
+        dir.join("content/blog.html"),
+        "@item{one}@item{two}@item{three}@paginate\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("content/blog.paginate.html"),
+        "<section>page $[paginate.current]/$[paginate.total]</section>\n",
+    )
+    .unwrap();
+
+    let engine = Engine::open(&dir).unwrap();
+    let result = engine.render_page("blog", &Context::new()).unwrap();
+
+    // output = page 1 (primary).
+    assert_eq!(result.output, "<main>Blog</main>\n<section>page 1/3</section>\n\n");
+    // complete pagination: pages 2..N ascending.
+    let pages: Vec<(usize, &str)> = result
+        .pagination
+        .iter()
+        .map(|p| (p.page, p.output.as_str()))
+        .collect();
+    assert_eq!(
+        pages,
+        vec![
+            (2, "<main>Blog</main>\n<section>page 2/3</section>\n\n"),
+            (3, "<main>Blog</main>\n<section>page 3/3</section>\n\n"),
+        ]
+    );
+    // pagination template is a dependency.
+    assert!(result.dependencies.contains("content/blog.paginate.html"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn non_paginated_render_has_empty_pagination() {
+    let dir = std::env::temp_dir().join(format!("nift-nonpag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in [".nift", "content", "templates", "public"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    std::fs::write(
+        dir.join(".nift/config.json"),
+        r#"{"config":{"content-dir":"content/","output-dir":"public/","default-template":"templates/template.html","build-threads":-1,"incremental-mode":"modified"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".nift/tracked.json"),
+        r#"{"tracked":[{"name":"/","title":"Home","template":"templates/template.html"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("templates/template.html"), "<main>@content</main>\n").unwrap();
+    std::fs::write(dir.join("content/index.html"), "<p>home</p>\n").unwrap();
+    let engine = Engine::open(&dir).unwrap();
+    let result = engine.render_page("/", &Context::new()).unwrap();
+    assert_eq!(result.output, "<main><p>home</p></main>\n");
+    assert!(result.pagination.is_empty(), "non-paginated render has empty pagination");
+    let _ = std::fs::remove_dir_all(&dir);
+}

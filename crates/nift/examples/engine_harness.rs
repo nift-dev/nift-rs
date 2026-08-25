@@ -64,7 +64,13 @@ fn main() {
     let mode = args.get(8).map(|m| m.as_str()).unwrap_or("composed");
     let seam = args.get(9).map(|s| s.as_str()).unwrap_or("-");
 
-    let mut engine = Engine::new();
+    let mut engine = if mode == "page" {
+        // Project-aware construction: open .nift/config.json + tracked.json so
+        // render_page can resolve the tracked page (NR8/NR9 lifecycle).
+        Engine::project(root.clone())
+    } else {
+        Engine::new()
+    };
     engine.set_root(root);
     let loader_keys = Arc::new(Mutex::new(BTreeSet::new()));
     if seam == "loader" {
@@ -115,7 +121,7 @@ fn main() {
 
     let mut context = Context::new();
     if !page_name.is_empty() {
-        context.set_page_name(page_name);
+        context.set_page_name(&page_name);
     }
     if !current_output.is_empty() {
         context.set_current_output(current_output);
@@ -131,7 +137,11 @@ fn main() {
         Source::path(template_path)
     };
 
-    let result = if mode == "partial" {
+    let result = if mode == "page" {
+        // Tracked-page render (project-aware): renders the named tracked page
+        // and exposes complete pagination.
+        engine.render_page(&page_name, &context)
+    } else if mode == "partial" {
         engine.render_partial(&page, &context)
     } else {
         engine.render(&page, &template, &context)
@@ -150,6 +160,18 @@ fn main() {
                 .map(|d| format!("\"{}\"", json_escape(d)))
                 .collect::<Vec<_>>()
                 .join(",");
+            let pages = result
+                .pagination
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{{\"page\":{},\"output\":\"{}\"}}",
+                        p.page,
+                        json_escape(&p.output)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             if seam == "loader" {
                 let keys = loader_keys
                     .lock()
@@ -159,18 +181,20 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(",");
                 println!(
-                    "{{\"ok\":true,\"output\":\"{}\",\"dependencies\":[{}],\"requirements\":[{}],\"loaderKeys\":[{}]}}",
+                    "{{\"ok\":true,\"output\":\"{}\",\"dependencies\":[{}],\"requirements\":[{}],\"pagination\":[{}],\"loaderKeys\":[{}]}}",
                     json_escape(&result.output),
                     deps,
                     reqs,
+                    pages,
                     keys
                 );
             } else {
                 println!(
-                    "{{\"ok\":true,\"output\":\"{}\",\"dependencies\":[{}],\"requirements\":[{}]}}",
+                    "{{\"ok\":true,\"output\":\"{}\",\"dependencies\":[{}],\"requirements\":[{}],\"pagination\":[{}]}}",
                     json_escape(&result.output),
                     deps,
-                    reqs
+                    reqs,
+                    pages
                 );
             }
         }

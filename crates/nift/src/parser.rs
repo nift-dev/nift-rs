@@ -171,8 +171,9 @@ pub fn render_tracked(
     };
 
     let mut output = output;
+    let mut pagination_pages: Vec<String> = Vec::new();
     if let Some(pagination) = paginate {
-        output = assemble_primary_pagination(
+        pagination_pages = assemble_pagination_pages(
             &mut state,
             host,
             identity,
@@ -180,9 +181,22 @@ pub fn render_tracked(
             &output,
             pagination,
         )?;
+        output = pagination_pages.first().cloned().unwrap_or(output);
     }
 
     let mut result = RenderResult::new(output);
+    // Complete pagination: pages 2..N with page numbers, ascending. Page 1 is
+    // `output`.
+    if pagination_pages.len() > 1 {
+        result.pagination = pagination_pages[1..]
+            .iter()
+            .enumerate()
+            .map(|(index, page_output)| crate::result::PageOutput {
+                page: index + 2,
+                output: page_output.clone(),
+            })
+            .collect();
+    }
     result.dependencies = state.dependencies;
     result.requirements = state.requirements;
     Ok(result)
@@ -191,14 +205,17 @@ pub fn render_tracked(
 /// Assembles the PRIMARY pagination page (reference `Parser::render()`
 /// pagination tail): exactly one `@paginate`, the pagination template and
 /// separator geometry, the page-1 item window and the marker replacement.
-fn assemble_primary_pagination(
+fn assemble_pagination_pages(
     state: &mut RenderState,
     host: &dyn RenderHost,
     identity: &RenderIdentity,
     content_path: &Path,
     base_output: &str,
     pagination: &crate::project::PaginationConfig,
-) -> Result<String, RenderError> {
+) -> Result<Vec<String>, RenderError> {
+    // Returns every rendered page in ascending order: index 0 is page 1 (the
+    // primary), index N-1 is page N (CP8: complete pagination in the public
+    // contract). Mirrors the reference per-page loop.
     if state.paginate_count != 1 {
         return Err(RenderError::new(
             ErrorKind::Render,
@@ -266,50 +283,54 @@ fn assemble_primary_pagination(
             .ok()
             .map(|cow| cow.into_owned())
     };
-
-    // Page-1 item window.
-    let finish = std::cmp::min(state.pagination_items.len(), pagination.items_per_page);
-    let mut items = String::new();
-    for index in 0..finish {
-        if index != 0 {
-            if let Some(separator) = &separator_source {
-                items.push_str(separator);
-            }
-        }
-        items.push_str(&state.pagination_items[index]);
-    }
-
-    state.pagination_items_text = Some(items);
-    state.pagination_current = 1;
-    state.pagination_total = total;
-    state.pagination_context_active = true;
-    state.pagination_collecting = false;
-    state.pagination_current_output = Some(host.pagination_output_path(identity, 1));
-
     let page_source = host.read_source(&pagination_template).map_err(|_| {
         RenderError::new(
             ErrorKind::Render,
             "pagination template is missing, unreadable, or outside the project",
         )
     })?;
-    let rendered = parse(
-        state,
-        host,
-        identity,
-        Some(&Source::path(content_path)),
-        &page_source,
-        &pagination_template,
-        0,
-    )?;
 
-    let mut output = base_output.to_string();
-    if let Some(marker_position) = output.find(PAGINATION_MARKER) {
-        output.replace_range(
-            marker_position..marker_position + PAGINATION_MARKER.len(),
-            &rendered,
-        );
+    let mut pages = Vec::with_capacity(total);
+    for page in 1..=total {
+        // Item window for this page.
+        let begin = (page - 1) * pagination.items_per_page;
+        let finish = std::cmp::min(state.pagination_items.len(), begin + pagination.items_per_page);
+        let mut items = String::new();
+        for index in begin..finish {
+            if index != begin {
+                if let Some(separator) = &separator_source {
+                    items.push_str(separator);
+                }
+            }
+            items.push_str(&state.pagination_items[index]);
+        }
+
+        state.pagination_items_text = Some(items);
+        state.pagination_current = page;
+        state.pagination_total = total;
+        state.pagination_context_active = true;
+        state.pagination_collecting = false;
+        state.pagination_current_output = Some(host.pagination_output_path(identity, page));
+
+        let rendered = parse(
+            state,
+            host,
+            identity,
+            Some(&Source::path(content_path)),
+            &page_source,
+            &pagination_template,
+            0,
+        )?;
+        let mut page_output = base_output.to_string();
+        if let Some(marker_position) = page_output.find(PAGINATION_MARKER) {
+            page_output.replace_range(
+                marker_position..marker_position + PAGINATION_MARKER.len(),
+                &rendered,
+            );
+        }
+        pages.push(page_output);
     }
-    Ok(output)
+    Ok(pages)
 }
 
 /// Per-render mutable state that persists across recursive parses.
