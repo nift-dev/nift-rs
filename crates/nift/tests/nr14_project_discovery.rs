@@ -52,7 +52,11 @@ fn absent_project_is_not_project() {
     // render_page on an unopened project reports the same controlled error.
     let result = engine.render_page("about", &nift::context::Context::new());
     let err = result.expect_err("render on non-project must fail");
-    assert!(err.message.contains("not a Nift project"), "{}", err.message);
+    assert!(
+        err.message.contains("not a Nift project"),
+        "{}",
+        err.message
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -110,7 +114,11 @@ fn malformed_config_is_config_error_not_not_project() {
     let error = engine.open_error().expect("must fail to open");
     assert_eq!(error.kind, ProjectErrorKind::ConfigJson);
     assert_ne!(error.kind, ProjectErrorKind::NotProject);
-    assert!(error.message.contains("invalid project config"), "{}", error.message);
+    assert!(
+        error.message.contains("invalid project config"),
+        "{}",
+        error.message
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -128,7 +136,11 @@ fn unknown_config_key_is_config_key_error_not_not_project() {
     let error = engine.open_error().expect("must fail to open");
     assert_eq!(error.kind, ProjectErrorKind::ConfigKey);
     assert_ne!(error.kind, ProjectErrorKind::NotProject);
-    assert!(error.message.contains("lolcat-default"), "{}", error.message);
+    assert!(
+        error.message.contains("lolcat-default"),
+        "{}",
+        error.message
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

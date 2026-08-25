@@ -319,7 +319,10 @@ fn assemble_pagination_pages(
     for page in 1..=total {
         // Item window for this page.
         let begin = (page - 1) * pagination.items_per_page;
-        let finish = std::cmp::min(state.pagination_items.len(), begin + pagination.items_per_page);
+        let finish = std::cmp::min(
+            state.pagination_items.len(),
+            begin + pagination.items_per_page,
+        );
         let mut items = String::new();
         for index in begin..finish {
             if index != begin {
@@ -1486,7 +1489,10 @@ fn parse(
                 }
                 let (content_text, content_identity) = match resolve_source(host, page) {
                     Ok(pair) => pair,
-                    Err(e) if matches!(page, Source::Path(_)) && e.kind == ErrorKind::MissingSource => {
+                    Err(e)
+                        if matches!(page, Source::Path(_))
+                            && e.kind == ErrorKind::MissingSource =>
+                    {
                         // Reference message for a missing/unreadable content
                         // page (the corpus missing-source reject class).
                         return Err(error_at(

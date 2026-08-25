@@ -10,7 +10,6 @@
 //! the token-boundary edge cases (comment openers, math operators, strings);
 //! JSX preserves JSX boundaries.
 
-
 /// Minification format (Minify++ `Format`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -113,7 +112,12 @@ fn css_needs_space(left: u8, right: u8) -> bool {
     {
         return true;
     }
-    if (left == b')' || left == b']' || left == b'%' || left == b'*' || left == b'\'' || left == b'"')
+    if (left == b')'
+        || left == b']'
+        || left == b'%'
+        || left == b'*'
+        || left == b'\''
+        || left == b'"')
         && (word_char(right)
             || right == b'.'
             || right == b'#'
@@ -291,11 +295,13 @@ fn css(input: &str) -> Result<String, String> {
             }
             output.push(c as char);
         } else {
-            if pending_space && (c == b'+' || c == b'-') && !output.is_empty() && output.as_bytes()[output.len() - 1] != b' ' {
-                output.push(' ');
-            } else if pending_space && !output.is_empty()
-                && (output.as_bytes()[output.len() - 1] == b'+' || output.as_bytes()[output.len() - 1] == b'-')
+            if pending_space
+                && (c == b'+' || c == b'-')
+                && !output.is_empty()
                 && output.as_bytes()[output.len() - 1] != b' '
+                && ((c == b'+' || c == b'-')
+                    || output.as_bytes()[output.len() - 1] == b'+'
+                    || output.as_bytes()[output.len() - 1] == b'-')
             {
                 output.push(' ');
             } else {
@@ -419,7 +425,13 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
                 i += 1;
             }
             let word = &input[begin..i];
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, word.as_bytes()[0]);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                word.as_bytes()[0],
+            );
             output.push_str(word);
 
             let was_pending_control_paren = pending_control_paren;
@@ -462,7 +474,13 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
                 i += 1;
             }
             let number = &input[begin..i];
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, number.as_bytes()[0]);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                number.as_bytes()[0],
+            );
             output.push_str(number);
             pending_control_paren = false;
             can_start_regex = false;
@@ -470,7 +488,13 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             continue;
         }
         if c == b'"' || c == b'\'' || c == b'`' {
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                c,
+            );
             output.push(c as char);
             i += 1;
             let quote = c;
@@ -502,7 +526,13 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             continue;
         }
         if c == b'{' {
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                c,
+            );
             let mut is_block = false;
             if pending_class_brace
                 || pending_function_brace
@@ -519,7 +549,8 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
                 || last_token == "class"
             {
                 is_block = true;
-            } else if last_token == ":" && (block_braces.is_empty() || *block_braces.last().unwrap())
+            } else if last_token == ":"
+                && (block_braces.is_empty() || *block_braces.last().unwrap())
             {
                 // Label `label: { ... }` closes like a block; a ternary/object
                 // colon value `{...}` is expression-like. Confirm the fragment
@@ -561,20 +592,33 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             continue;
         }
         if c == b'}' {
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                c,
+            );
             output.push('}');
-            let was_block = match block_braces.pop() {
-                Some(b) => b,
-                None => true,
-            };
+            let was_block = block_braces.pop().unwrap_or(true);
             pending_control_paren = false;
             can_start_regex = was_block;
-            last_token = if was_block { "}block".to_string() } else { "}object".to_string() };
+            last_token = if was_block {
+                "}block".to_string()
+            } else {
+                "}object".to_string()
+            };
             i += 1;
             continue;
         }
         if c == b'(' {
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                c,
+            );
             output.push('(');
             control_parens.push(pending_control_paren);
             pending_control_paren = false;
@@ -584,7 +628,13 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             continue;
         }
         if c == b')' {
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                c,
+            );
             output.push(')');
             let was_control = control_parens.last() == Some(&true);
             if !control_parens.is_empty() {
@@ -592,7 +642,11 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             }
             pending_control_paren = false;
             can_start_regex = was_control;
-            last_token = if was_control { ")control".to_string() } else { ")".to_string() };
+            last_token = if was_control {
+                ")control".to_string()
+            } else {
+                ")".to_string()
+            };
             i += 1;
             continue;
         }
@@ -611,9 +665,16 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
                 return Err("unterminated JavaScript block comment".to_string());
             };
             let close = i + 2 + rel;
-            let had_newline = input[i + 2..close].contains('\n') || input[i + 2..close].contains('\r');
+            let had_newline =
+                input[i + 2..close].contains('\n') || input[i + 2..close].contains('\r');
             if preserve {
-                emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, b'/');
+                emit_pending_js(
+                    &mut output,
+                    &mut pending_space,
+                    &mut pending_newline,
+                    preserve_jsx_boundaries,
+                    b'/',
+                );
                 output.push_str(&input[i..close + 2]);
             } else if had_newline {
                 pending_newline = true;
@@ -623,8 +684,18 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             i = close + 2;
             continue;
         }
-        if c == b'/' && can_start_regex && i + 1 < input.len() && (output.is_empty() || output.as_bytes().last() != Some(&b'<')) {
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+        if c == b'/'
+            && can_start_regex
+            && i + 1 < input.len()
+            && (output.is_empty() || output.as_bytes().last() != Some(&b'<'))
+        {
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                c,
+            );
             output.push('/');
             i += 1;
             let mut escaped = false;
@@ -670,7 +741,13 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             // Copy the full UTF-8 character (do not split multibyte sequences).
             let rest = &input[i..];
             let ch = rest.chars().next().unwrap();
-            emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+            emit_pending_js(
+                &mut output,
+                &mut pending_space,
+                &mut pending_newline,
+                preserve_jsx_boundaries,
+                c,
+            );
             output.push(ch);
             i += ch.len_utf8();
             pending_control_paren = false;
@@ -678,14 +755,33 @@ fn minify_javascript(input: &str, preserve_jsx_boundaries: bool) -> Result<Strin
             last_token = ch.to_string();
             continue;
         }
-        emit_pending_js(&mut output, &mut pending_space, &mut pending_newline, preserve_jsx_boundaries, c);
+        emit_pending_js(
+            &mut output,
+            &mut pending_space,
+            &mut pending_newline,
+            preserve_jsx_boundaries,
+            c,
+        );
         output.push(c as char);
         pending_control_paren = false;
         if word_char(c) || c == b']' || c == b'.' || c == b'\'' || c == b'"' || c == b'`' {
             can_start_regex = false;
-        } else if c == b';' || c == b',' || c == b':' || c == b'[' || c == b'=' || c == b'!' || c == b'?'
-            || c == b'&' || c == b'|' || c == b'+' || c == b'-' || c == b'*' || c == b'%' || c == b'<'
-            || c == b'>' || c == b'/'
+        } else if c == b';'
+            || c == b','
+            || c == b':'
+            || c == b'['
+            || c == b'='
+            || c == b'!'
+            || c == b'?'
+            || c == b'&'
+            || c == b'|'
+            || c == b'+'
+            || c == b'-'
+            || c == b'*'
+            || c == b'%'
+            || c == b'<'
+            || c == b'>'
+            || c == b'/'
         {
             can_start_regex = true;
         }
@@ -729,12 +825,27 @@ fn looks_like_jsx_root_start(input: &str, i: usize) -> bool {
     let prev = bytes[p - 1];
     if matches!(
         prev,
-        b'=' | b'(' | b'[' | b'{' | b',' | b':' | b';' | b'?' | b'!' | b'&' | b'|' | b'+' | b'-'
-            | b'*' | b'%' | b'~' | b'^' | b'>'
+        b'=' | b'('
+            | b'['
+            | b'{'
+            | b','
+            | b':'
+            | b';'
+            | b'?'
+            | b'!'
+            | b'&'
+            | b'|'
+            | b'+'
+            | b'-'
+            | b'*'
+            | b'%'
+            | b'~'
+            | b'^'
+            | b'>'
     ) {
         return true;
     }
-    let mut end = p;
+    let end = p;
     while p > 0 {
         let c = bytes[p - 1];
         if !(c.is_ascii_alphanumeric() || bytes[p - 1] == b'_' || bytes[p - 1] == b'$') {
@@ -957,9 +1068,7 @@ fn find_nested_jsx_end(input: &str, start: usize, limit: usize) -> Result<usize,
                 started = true;
                 depth = if self_closing { 0 } else { 1 };
             } else if closing {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
             } else if !self_closing {
                 depth += 1;
             }
@@ -1092,7 +1201,9 @@ fn find_jsx_expression_end(input: &str, start: usize, limit: usize) -> Result<us
                 }
             }
             if !closed {
-                return Err("unterminated JavaScript regular expression in JSX expression".to_string());
+                return Err(
+                    "unterminated JavaScript regular expression in JSX expression".to_string(),
+                );
             }
             while i < limit && bytes[i].is_ascii_alphabetic() {
                 i += 1;
@@ -1121,9 +1232,23 @@ fn find_jsx_expression_end(input: &str, start: usize, limit: usize) -> Result<us
         }
         if word_char(c) || c == b')' || c == b']' || c == b'.' {
             can_start_regex = false;
-        } else if c == b';' || c == b',' || c == b':' || c == b'(' || c == b'[' || c == b'=' || c == b'!'
-            || c == b'?' || c == b'&' || c == b'|' || c == b'+' || c == b'-' || c == b'*' || c == b'/'
-            || c == b'%' || c == b'<' || c == b'>'
+        } else if c == b';'
+            || c == b','
+            || c == b':'
+            || c == b'('
+            || c == b'['
+            || c == b'='
+            || c == b'!'
+            || c == b'?'
+            || c == b'&'
+            || c == b'|'
+            || c == b'+'
+            || c == b'-'
+            || c == b'*'
+            || c == b'/'
+            || c == b'%'
+            || c == b'<'
+            || c == b'>'
         {
             can_start_regex = true;
         }
@@ -1179,11 +1304,26 @@ fn jsx(input: &str) -> Result<String, String> {
                 let prev = bytes[p - 1];
                 regex_here = matches!(
                     prev,
-                    b'=' | b'(' | b'[' | b'{' | b',' | b':' | b';' | b'?' | b'!' | b'&' | b'|'
-                        | b'+' | b'-' | b'*' | b'%' | b'~' | b'^' | b'>'
+                    b'=' | b'('
+                        | b'['
+                        | b'{'
+                        | b','
+                        | b':'
+                        | b';'
+                        | b'?'
+                        | b'!'
+                        | b'&'
+                        | b'|'
+                        | b'+'
+                        | b'-'
+                        | b'*'
+                        | b'%'
+                        | b'~'
+                        | b'^'
+                        | b'>'
                 );
                 if !regex_here && (prev.is_ascii_alphabetic() || prev == b'_' || prev == b'$') {
-                    let mut end = p;
+                    let end = p;
                     while p > js_start {
                         let u = bytes[p - 1];
                         if !(u.is_ascii_alphanumeric() || u == b'_' || u == b'$') {
@@ -1214,9 +1354,7 @@ fn jsx(input: &str) -> Result<String, String> {
                         in_class = true;
                     } else if c == b']' {
                         in_class = false;
-                    } else if c == b'/' && !in_class {
-                        break;
-                    } else if c == b'\n' || c == b'\r' {
+                    } else if (c == b'/' && !in_class) || c == b'\n' || c == b'\r' {
                         break;
                     }
                 }
@@ -1261,7 +1399,8 @@ fn jsx(input: &str) -> Result<String, String> {
         while p < input.len() {
             if bytes[p] == b'<' && looks_like_jsx_start(input, p) {
                 let closing = p + 1 < input.len() && bytes[p + 1] == b'/';
-                let fragment_close = p + 2 < input.len() && bytes[p + 1] == b'/' && bytes[p + 2] == b'>';
+                let fragment_close =
+                    p + 2 < input.len() && bytes[p + 1] == b'/' && bytes[p + 2] == b'>';
                 let mut j = p + 1;
                 let mut quoted = false;
                 let mut escaped = false;
@@ -1365,9 +1504,7 @@ fn jsx(input: &str) -> Result<String, String> {
                     started = true;
                     depth = if self_closing { 0 } else { 1 };
                 } else if closing || fragment_close {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
+                    depth = depth.saturating_sub(1);
                 } else if !self_closing {
                     depth += 1;
                 }
@@ -1475,7 +1612,11 @@ fn xml_like(input: &str, _svg_mode: bool) -> Result<String, String> {
                         in_quote = false;
                     }
                 } else if c == b'\'' || c == b'"' {
-                    if ws_pending && !output.is_empty() && output.as_bytes()[output.len() - 1] != b'<' && output.as_bytes()[output.len() - 1] != b' ' {
+                    if ws_pending
+                        && !output.is_empty()
+                        && output.as_bytes()[output.len() - 1] != b'<'
+                        && output.as_bytes()[output.len() - 1] != b' '
+                    {
                         output.push(' ');
                     }
                     ws_pending = false;
@@ -1485,7 +1626,9 @@ fn xml_like(input: &str, _svg_mode: bool) -> Result<String, String> {
                 } else if ws(c) {
                     ws_pending = true;
                 } else if c >= 0x80 {
-                    if ws_pending && !output.is_empty() && output.as_bytes()[output.len() - 1] != b' '
+                    if ws_pending
+                        && !output.is_empty()
+                        && output.as_bytes()[output.len() - 1] != b' '
                         && output.as_bytes()[output.len() - 1] != b'<'
                     {
                         output.push(' ');
@@ -1500,9 +1643,12 @@ fn xml_like(input: &str, _svg_mode: bool) -> Result<String, String> {
                             || (output.as_bytes()[output.len() - 1] == b'/'
                                 && output.len() >= 2
                                 && output.as_bytes()[output.len() - 2] == b'<'));
-                    if ws_pending && !output.is_empty()
+                    if ws_pending
+                        && !output.is_empty()
                         && (after_tag_prefix
-                            || (output.as_bytes()[output.len() - 1] != b'/' && c != b'>' && c != b'/'))
+                            || (output.as_bytes()[output.len() - 1] != b'/'
+                                && c != b'>'
+                                && c != b'/'))
                     {
                         output.push(' ');
                     }
@@ -1570,7 +1716,6 @@ fn html(input: &str) -> Result<String, String> {
             }
             if !found {
                 output.push_str(&input[i..]);
-                i = input.len();
                 break;
             }
             output.push_str(&input[i..p]);
@@ -1641,7 +1786,11 @@ fn html(input: &str) -> Result<String, String> {
                         in_quote = false;
                     }
                 } else if c == b'\'' || c == b'"' {
-                    if tag_space && !output.is_empty() && output.as_bytes()[output.len() - 1] != b'<' && output.as_bytes()[output.len() - 1] != b' ' {
+                    if tag_space
+                        && !output.is_empty()
+                        && output.as_bytes()[output.len() - 1] != b'<'
+                        && output.as_bytes()[output.len() - 1] != b' '
+                    {
                         output.push(' ');
                     }
                     tag_space = false;
@@ -1656,9 +1805,12 @@ fn html(input: &str) -> Result<String, String> {
                             || (output.as_bytes()[output.len() - 1] == b'/'
                                 && output.len() >= 2
                                 && output.as_bytes()[output.len() - 2] == b'<'));
-                    if tag_space && !output.is_empty()
+                    if tag_space
+                        && !output.is_empty()
                         && (after_tag_prefix
-                            || (output.as_bytes()[output.len() - 1] != b'/' && c != b'>' && c != b'/'))
+                            || (output.as_bytes()[output.len() - 1] != b'/'
+                                && c != b'>'
+                                && c != b'/'))
                     {
                         output.push(' ');
                     }
@@ -1673,7 +1825,9 @@ fn html(input: &str) -> Result<String, String> {
             }
             if n < j && bytes[n] != b'/' && bytes[n] != b'!' && bytes[n] != b'?' {
                 let mut e = n;
-                while e < j && (bytes[e].is_ascii_alphanumeric() || bytes[e] == b'-' || bytes[e] == b':') {
+                while e < j
+                    && (bytes[e].is_ascii_alphanumeric() || bytes[e] == b'-' || bytes[e] == b':')
+                {
                     e += 1;
                 }
                 let name = input[n..e].to_ascii_lowercase();
@@ -1744,10 +1898,7 @@ mod tests {
     fn xml_and_svg_formats() {
         let xml = xml_like("<a>  <b  x=\"1\"  >hi</b>  </a>", false).unwrap();
         assert_eq!(xml, "<a>  <b x=\"1\">hi</b>  </a>");
-        assert_eq!(
-            xml_like("<!--c--><a/>", false).unwrap(),
-            "<a/>"
-        );
+        assert_eq!(xml_like("<!--c--><a/>", false).unwrap(), "<a/>");
         assert_eq!(
             xml_like("<a><![CDATA[ keep <raw> ]]></a>", false).unwrap(),
             "<a><![CDATA[ keep <raw> ]]></a>"
@@ -1763,7 +1914,10 @@ mod tests {
         );
         let asi = minify_javascript("var a = 1;\nvar b = a\n+ 1;", false).unwrap();
         assert!(asi.contains('\n'), "ASI-significant newline must survive");
-        assert_eq!(minify_javascript("// comment\nvar x = 1;", false).unwrap(), "var x=1;");
+        assert_eq!(
+            minify_javascript("// comment\nvar x = 1;", false).unwrap(),
+            "var x=1;"
+        );
     }
 
     #[test]
@@ -1777,7 +1931,10 @@ mod tests {
     fn idempotence_on_representative_inputs() {
         let inputs = [
             (Format::Html, "<div  class=\"a\" >  <p> hi </p>  </div>"),
-            (Format::Css, "body { color : red ; } /* x */ p { margin : 0 }"),
+            (
+                Format::Css,
+                "body { color : red ; } /* x */ p { margin : 0 }",
+            ),
             (Format::Json, "{ \"a\" : 1, \"b\" : [ 1, 2 ] }"),
             (Format::Xml, "<a> <b/> </a>"),
         ];
@@ -1791,8 +1948,27 @@ mod tests {
     #[test]
     fn adversarial_inputs_never_panic() {
         for input in [
-            "<", "</", "<!--", "<!--x", "<![CDATA[", "<?", "\"", "'", "/", "/*", "//",
-            "{", "}", "(", ")", "1e", "0x", "<div", "const", "return", "\u{0}\u{1}",
+            "<",
+            "</",
+            "<!--",
+            "<!--x",
+            "<![CDATA[",
+            "<?",
+            "\"",
+            "'",
+            "/",
+            "/*",
+            "//",
+            "{",
+            "}",
+            "(",
+            ")",
+            "1e",
+            "0x",
+            "<div",
+            "const",
+            "return",
+            "\u{0}\u{1}",
         ] {
             for format in [
                 Format::Html,
@@ -1818,13 +1994,31 @@ mod bench {
     #[ignore = "hardware/performance-sensitive; use examples/bench.rs for real numbers"]
     fn per_format_throughput_and_output() {
         let cases: &[(Format, &str)] = &[
-            (Format::Html, "<div  class=\"a\" >  <p> hello world </p>  <span> x </span> </div>"),
-            (Format::Css, "body { color : red ; margin : 0  10px ; } /* c */ p { padding : 1px 2px ; }"),
-            (Format::Json, "{ \"a\" : 1, \"b\" : [ 1, 2, 3 ], \"c\" : { \"d\" : \"e\" } }"),
+            (
+                Format::Html,
+                "<div  class=\"a\" >  <p> hello world </p>  <span> x </span> </div>",
+            ),
+            (
+                Format::Css,
+                "body { color : red ; margin : 0  10px ; } /* c */ p { padding : 1px 2px ; }",
+            ),
+            (
+                Format::Json,
+                "{ \"a\" : 1, \"b\" : [ 1, 2, 3 ], \"c\" : { \"d\" : \"e\" } }",
+            ),
             (Format::Xml, "<a> <b  x=\"1\" > text </b> <c/> </a>"),
-            (Format::Svg, "<svg> <rect  width=\"10\"  height=\"10\" /> <!-- c --> </svg>"),
-            (Format::JavaScript, "function f ( a , b ) { return a  +  b ; } // comment"),
-            (Format::Jsx, "const el = <div  className=\"a\" > hello </div>;"),
+            (
+                Format::Svg,
+                "<svg> <rect  width=\"10\"  height=\"10\" /> <!-- c --> </svg>",
+            ),
+            (
+                Format::JavaScript,
+                "function f ( a , b ) { return a  +  b ; } // comment",
+            ),
+            (
+                Format::Jsx,
+                "const el = <div  className=\"a\" > hello </div>;",
+            ),
         ];
         const ROUNDS: usize = 50_000;
         for (format, input) in cases {

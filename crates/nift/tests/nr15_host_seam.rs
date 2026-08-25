@@ -37,9 +37,18 @@ fn two_page_project(root: &Path) {
  {"name":"other","title":"Other","template":"templates/template.html","paginate":{"items-per-page":1}}
 ]}"#,
     );
-    write_file(&root.join("templates/template.html"), "<main>$[title]</main>\n@content");
-    write_file(&root.join("content/blog.html"), "@item{one}@item{two}@item{three}@paginate");
-    write_file(&root.join("content/other.html"), "@item{a}@item{b}@paginate");
+    write_file(
+        &root.join("templates/template.html"),
+        "<main>$[title]</main>\n@content",
+    );
+    write_file(
+        &root.join("content/blog.html"),
+        "@item{one}@item{two}@item{three}@paginate",
+    );
+    write_file(
+        &root.join("content/other.html"),
+        "@item{a}@item{b}@paginate",
+    );
     write_file(
         &root.join("content/blog.paginate.html"),
         "<section>@getenv(FAIL_BARRIER) page $[paginate.current]/$[paginate.total]</section>",
@@ -95,14 +104,18 @@ fn paginated_env_host_failure_fails_render() {
     assert!(failed.unwrap_err().message.contains("host exploded"));
 
     // other's paginate template reads @getenv(OK_BARRIER): it renders.
-    let ok = engine.render_page("other", &Context::new()).expect("render");
+    let ok = engine
+        .render_page("other", &Context::new())
+        .expect("render");
     assert!(ok.output.contains("ok"), "{}", ok.output);
     assert_eq!(ok.pagination.len(), 1);
 
     // NotFound provider: ordinary unset, paginated render succeeds.
     let mut unset_engine = Engine::project(&root);
     unset_engine.set_environment_provider_result(|_| HostResult::NotFound);
-    let unset = unset_engine.render_page("blog", &Context::new()).expect("render");
+    let unset = unset_engine
+        .render_page("blog", &Context::new())
+        .expect("render");
     assert_eq!(unset.pagination.len(), 2);
 }
 
@@ -120,7 +133,11 @@ fn concurrent_paginated_attribution() {
         let engine_a = std::sync::Arc::clone(&engine);
         let engine_b = std::sync::Arc::clone(&engine);
         let handle_a = thread::spawn(move || engine_a.render_page("blog", &Context::new()));
-        let handle_b = thread::spawn(move || engine_b.render_page("other", &Context::new()).expect("render B"));
+        let handle_b = thread::spawn(move || {
+            engine_b
+                .render_page("other", &Context::new())
+                .expect("render B")
+        });
         let a: Result<RenderResult, nift::RenderError> = handle_a.join().expect("join A");
         let b: RenderResult = handle_b.join().expect("join B");
         assert!(a.is_err(), "blog must fail");
@@ -236,8 +253,14 @@ fn separator_project(root: &Path) -> ProjectState {
         &root.join(".nift/tracked.json"),
         r#"{"tracked":[{"name":"blog","title":"Blog","template":"templates/template.html","paginate":{"items-per-page":1}}]}"#,
     );
-    write_file(&root.join("templates/template.html"), "<main>$[title]</main>\n@content");
-    write_file(&root.join("content/blog.html"), "@item{one}@item{two}@paginate");
+    write_file(
+        &root.join("templates/template.html"),
+        "<main>$[title]</main>\n@content",
+    );
+    write_file(
+        &root.join("content/blog.html"),
+        "@item{one}@item{two}@paginate",
+    );
     write_file(
         &root.join("content/blog.paginate.html"),
         "<section>$[paginate.items]-$[paginate.current]/$[paginate.total]</section>",
@@ -246,7 +269,10 @@ fn separator_project(root: &Path) -> ProjectState {
     ProjectState::open(root).expect("open project")
 }
 
-fn render_with_host(state: &ProjectState, outcome: SeparatorOutcome) -> Result<nift::result::RenderResult, nift::RenderError> {
+fn render_with_host(
+    state: &ProjectState,
+    outcome: SeparatorOutcome,
+) -> Result<nift::result::RenderResult, nift::RenderError> {
     let info = state.find("blog").expect("blog tracked");
     let identity = RenderIdentity {
         name: Some(info.name.clone()),
@@ -258,7 +284,11 @@ fn render_with_host(state: &ProjectState, outcome: SeparatorOutcome) -> Result<n
         },
     };
     let paginate = PaginationConfig {
-        items_per_page: info.paginate.as_ref().map(|p| p.items_per_page).unwrap_or(1),
+        items_per_page: info
+            .paginate
+            .as_ref()
+            .map(|p| p.items_per_page)
+            .unwrap_or(1),
         template_path: None,
         separator_path: None,
     };
@@ -299,8 +329,14 @@ fn pagination_error_selection_is_page_order() {
         &root.join(".nift/tracked.json"),
         r#"{"tracked":[{"name":"blog","title":"Blog","template":"templates/template.html","paginate":{"items-per-page":1}}]}"#,
     );
-    write_file(&root.join("templates/template.html"), "<main>$[title]</main>\n@content");
-    write_file(&root.join("content/blog.html"), "@item{one}@item{two}@paginate");
+    write_file(
+        &root.join("templates/template.html"),
+        "<main>$[title]</main>\n@content",
+    );
+    write_file(
+        &root.join("content/blog.html"),
+        "@item{one}@item{two}@paginate",
+    );
     write_file(
         &root.join("content/blog.paginate.html"),
         "<section>@getenv(FAIL) $[paginate.current]</section>",
@@ -447,7 +483,8 @@ fn pagination_template_host_error_preserves_diagnostic() {
     let missing = render_tracked(&notfound_host, &identity, Some(&paginate));
     let missing_message = missing.unwrap_err().message;
     assert!(
-        missing_message.contains("pagination template is missing, unreadable, or outside the project"),
+        missing_message
+            .contains("pagination template is missing, unreadable, or outside the project"),
         "{missing_message}"
     );
 }

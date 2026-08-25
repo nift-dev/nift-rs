@@ -82,8 +82,14 @@ fn write_project(root: &Path) {
         &root.join(".nift/config.json"),
         r#"{"config":{"content-dir":"content/","content-ext":".html","output-dir":"public/","output-ext":".html","default-template":"templates/template.html","incremental-mode":"modified"}}"#,
     );
-    write_file(&root.join(".nift/tracked.json"), &tracked_with_title("GEN-A"));
-    write_file(&root.join("templates/template.html"), "<main>$[title]</main>\n@content");
+    write_file(
+        &root.join(".nift/tracked.json"),
+        &tracked_with_title("GEN-A"),
+    );
+    write_file(
+        &root.join("templates/template.html"),
+        "<main>$[title]</main>\n@content",
+    );
     write_file(
         &root.join("content/blog.html"),
         "@item{A1}@item{A2}@item{A3}@paginate",
@@ -144,18 +150,29 @@ fn concurrent_reload_single_snapshot() {
         // Render is deterministically inside the pagination loop now.
         barrier.wait_entered();
         // Publish generation B while the render is mid-flight.
-        write_file(&root.join(".nift/tracked.json"), &tracked_with_title("GEN-B"));
+        write_file(
+            &root.join(".nift/tracked.json"),
+            &tracked_with_title("GEN-B"),
+        );
         engine.reload().expect("reload generation B");
         barrier.release();
         render.join().expect("render thread")
     });
 
     // The single result is entirely generation A -- page 1 and pages 2..3.
-    assert!(result_is_entirely(&result, "GEN-A", "GEN-B", true), "mixed generations");
+    assert!(
+        result_is_entirely(&result, "GEN-A", "GEN-B", true),
+        "mixed generations"
+    );
 
     // The next render observes the newly published generation B.
-    let next = engine.render_page("blog", &Context::new()).expect("render after reload");
-    assert!(result_is_entirely(&next, "GEN-B", "GEN-A", true), "next render not entirely B");
+    let next = engine
+        .render_page("blog", &Context::new())
+        .expect("render after reload");
+    assert!(
+        result_is_entirely(&next, "GEN-B", "GEN-A", true),
+        "next render not entirely B"
+    );
 }
 
 #[test]
@@ -163,7 +180,7 @@ fn failed_reload_retains_last_good() {
     let root = temp_dir("failed");
     write_project(&root);
 
-    let mut engine = Engine::project(&root);
+    let engine = Engine::project(&root);
     assert!(engine.is_open());
 
     let first = engine.render_page("blog", &Context::new()).expect("render");
@@ -175,13 +192,22 @@ fn failed_reload_retains_last_good() {
     assert!(engine.is_open());
 
     let after_failed = engine.render_page("blog", &Context::new()).expect("render");
-    assert!(result_is_entirely(&after_failed, "GEN-A", "GEN-B", true), "last-good lost");
+    assert!(
+        result_is_entirely(&after_failed, "GEN-A", "GEN-B", true),
+        "last-good lost"
+    );
 
     // A later valid reload recovers; the next render observes the new generation.
-    write_file(&root.join(".nift/tracked.json"), &tracked_with_title("GEN-C"));
+    write_file(
+        &root.join(".nift/tracked.json"),
+        &tracked_with_title("GEN-C"),
+    );
     engine.reload().expect("reload recovery");
     let recovered = engine.render_page("blog", &Context::new()).expect("render");
-    assert!(result_is_entirely(&recovered, "GEN-C", "GEN-A", true), "recovery not entirely C");
+    assert!(
+        result_is_entirely(&recovered, "GEN-C", "GEN-A", true),
+        "recovery not entirely C"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

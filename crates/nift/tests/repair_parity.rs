@@ -28,7 +28,11 @@ fn scaffold(root: &Path) {
           {"name":"about","title":"About","template":"templates/template.html"}]}"#,
     )
     .unwrap();
-    fs::write(root.join("templates/template.html"), "<main>@content</main>\n").unwrap();
+    fs::write(
+        root.join("templates/template.html"),
+        "<main>@content</main>\n",
+    )
+    .unwrap();
     fs::write(root.join("content/index.html"), "<p>home</p>\n").unwrap();
     fs::write(root.join("content/about.html"), "<p>about</p>\n").unwrap();
 }
@@ -56,7 +60,7 @@ fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
 fn render_primary(root: &Path, page: &str) -> String {
     // The engine's render_page output is the canonical page output (conformance
     // corpus goldens validate Rust-engine == C++-build bytes).
-    let mut engine = nift::engine::Engine::open(root).unwrap();
+    let engine = nift::engine::Engine::open(root).unwrap();
     let result = engine
         .render_page(page, &nift::context::Context::new())
         .unwrap();
@@ -157,7 +161,10 @@ fn repair_refuses_live_owner() {
         "repair refuses a live owner: {err}"
     );
     drop(holder); // simulated crash: lock released by the kernel, marker survives
-    assert!(marker(&root), "marker survives process death (stale evidence)");
+    assert!(
+        marker(&root),
+        "marker survives process death (stale evidence)"
+    );
     repair_project(&root).expect("repair may take a stale marker");
     assert!(!marker(&root), "marker cleared after repair");
 }
@@ -169,9 +176,13 @@ fn repair_failure_retains_marker() {
     repair_project(&root).expect("initial repair succeeds");
     // Break an authoritative input: repair must fail and retain the marker.
     fs::write(root.join("templates/template.html"), "@if(never closed{\n").unwrap();
-    let err = repair_project(&root).unwrap_err();
+    repair_project(&root).unwrap_err();
     assert!(marker(&root), "failed repair retains the marker");
-    fs::write(root.join("templates/template.html"), "<main>@content</main>\n").unwrap();
+    fs::write(
+        root.join("templates/template.html"),
+        "<main>@content</main>\n",
+    )
+    .unwrap();
     repair_project(&root).expect("fixed repair succeeds");
     assert!(!marker(&root), "marker cleared after successful repair");
 }

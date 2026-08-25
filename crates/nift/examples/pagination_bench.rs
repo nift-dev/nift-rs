@@ -32,7 +32,10 @@ fn main() {
         &root.join(".nift/tracked.json"),
         r#"{"tracked":[{"name":"blog","title":"Blog","template":"templates/template.html","paginate":{"items-per-page":1}}]}"#,
     );
-    write_file(&root.join("templates/template.html"), "<main>$[title]</main>\n@content");
+    write_file(
+        &root.join("templates/template.html"),
+        "<main>$[title]</main>\n@content",
+    );
     write_file(
         &root.join("content/blog.html"),
         "@item{one}@item{two}@item{three}@paginate",

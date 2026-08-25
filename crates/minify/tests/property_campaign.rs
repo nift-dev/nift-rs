@@ -45,10 +45,18 @@ fn mutate(value: &str, rng: &mut Rng) -> String {
             let b = BYTES[(rng.next() % BYTES.len() as u64) as usize];
             value.insert(position, b as char);
         } else if operation == 1 && !value.is_empty() {
-            let pos = if position == value.len() { position - 1 } else { position };
+            let pos = if position == value.len() {
+                position - 1
+            } else {
+                position
+            };
             value.remove(pos);
         } else if operation == 2 && !value.is_empty() {
-            let pos = if position == value.len() { position - 1 } else { position };
+            let pos = if position == value.len() {
+                position - 1
+            } else {
+                position
+            };
             let b = BYTES[(rng.next() % BYTES.len() as u64) as usize];
             let mut chars: Vec<char> = value.chars().collect();
             if pos < chars.len() {
@@ -59,7 +67,11 @@ fn mutate(value: &str, rng: &mut Rng) -> String {
             let start = (rng.next() % value.len() as u64) as usize;
             let length = std::cmp::min(value.len() - start, 1 + (rng.next() % 16) as usize);
             let dup = value[start..start + length].to_string();
-            let pos = if position > value.len() { value.len() } else { position };
+            let pos = if position > value.len() {
+                value.len()
+            } else {
+                position
+            };
             value.insert_str(pos, &dup);
         }
     }
@@ -68,11 +80,26 @@ fn mutate(value: &str, rng: &mut Rng) -> String {
 
 /// Representative valid seeds per format (the campaign mutates these).
 const SEEDS: &[(Format, &str)] = &[
-    (Format::Html, "<div class=\"a\"><p>hello world</p><span> x </span></div>"),
-    (Format::Css, ".a { color: red; margin: 0 10px; } body { background: url(\"x.png\"); }"),
-    (Format::Json, "{\"a\":1,\"b\":[true,null,\"x y\"],\"c\":{\"d\":1.5}}"),
-    (Format::Xml, "<root xmlns:x=\"u\"><a x=\"1\">text</a><b><![CDATA[x < y]]></b></root>"),
-    (Format::Svg, "<svg viewBox=\"0 0 1 1\"><path d=\"M 0 0 L 1 1\"/></svg>"),
+    (
+        Format::Html,
+        "<div class=\"a\"><p>hello world</p><span> x </span></div>",
+    ),
+    (
+        Format::Css,
+        ".a { color: red; margin: 0 10px; } body { background: url(\"x.png\"); }",
+    ),
+    (
+        Format::Json,
+        "{\"a\":1,\"b\":[true,null,\"x y\"],\"c\":{\"d\":1.5}}",
+    ),
+    (
+        Format::Xml,
+        "<root xmlns:x=\"u\"><a x=\"1\">text</a><b><![CDATA[x < y]]></b></root>",
+    ),
+    (
+        Format::Svg,
+        "<svg viewBox=\"0 0 1 1\"><path d=\"M 0 0 L 1 1\"/></svg>",
+    ),
     (
         Format::JavaScript,
         "function f(a,b){return a+b;} const r=/https?:\\/\\//; const t=`x ${a} y`;",
@@ -87,14 +114,14 @@ const MUTATIONS_PER_SEED: usize = 4000;
 
 #[test]
 fn deterministic_mutation_campaign_no_panic_idempotent() {
-    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let mut generated = 0usize;
     let mut ok_count = 0usize;
     let mut panic_count = 0usize;
     let mut second_pass_rejections = 0usize;
     let mut non_idempotent = 0usize;
     for (index, (format, seed)) in SEEDS.iter().enumerate() {
-        let mut local = Rng(0x5DEECE66D ^ (0x9E3779B97F4A7C15u64.wrapping_add(index as u64 * 0x9E37_79B9 + 1)));
+        let mut local =
+            Rng(0x5DEECE66D ^ (0x9E3779B97F4A7C15u64.wrapping_add(index as u64 * 0x9E37_79B9 + 1)));
         for _ in 0..MUTATIONS_PER_SEED {
             let input = mutate(seed, &mut local);
             generated += 1;

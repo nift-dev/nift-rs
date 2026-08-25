@@ -73,18 +73,35 @@ impl Ownership {
                     Ok(file) => (file, false),
                     Err(_) => {
                         return (
-                            Self { marker, file: None, owned: false },
+                            Self {
+                                marker,
+                                file: None,
+                                owned: false,
+                            },
                             OwnershipState::Failed,
                         )
                     }
                 }
             }
-            Err(_) => return (Self { marker, file: None, owned: false }, OwnershipState::Failed),
+            Err(_) => {
+                return (
+                    Self {
+                        marker,
+                        file: None,
+                        owned: false,
+                    },
+                    OwnershipState::Failed,
+                )
+            }
         };
         match file.try_lock() {
             Ok(()) => {
                 let _ = file.sync_all(); // best-effort marker durability (one op)
-                let ownership = Self { marker, file: Some(file), owned: true };
+                let ownership = Self {
+                    marker,
+                    file: Some(file),
+                    owned: true,
+                };
                 ownership.hold_for_tests();
                 if was_created {
                     (ownership, OwnershipState::Clean)
@@ -92,7 +109,14 @@ impl Ownership {
                     (ownership, OwnershipState::Stale)
                 }
             }
-            Err(_) => (Self { marker, file: None, owned: false }, OwnershipState::Live),
+            Err(_) => (
+                Self {
+                    marker,
+                    file: None,
+                    owned: false,
+                },
+                OwnershipState::Live,
+            ),
         }
     }
 
@@ -137,7 +161,9 @@ pub struct RepairError {
 
 impl RepairError {
     fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        Self {
+            message: message.into(),
+        }
     }
 }
 
@@ -167,9 +193,7 @@ pub fn repair_project(root: &Path) -> Result<(), RepairError> {
                 "another build appears to be running; refusing to mutate build state",
             ))
         }
-        OwnershipState::Failed => {
-            return Err(RepairError::new("could not acquire the build lock"))
-        }
+        OwnershipState::Failed => return Err(RepairError::new("could not acquire the build lock")),
         OwnershipState::Clean | OwnershipState::Stale => {}
     }
 
@@ -211,7 +235,8 @@ fn write_primary_output(
 ) -> Result<(), RepairError> {
     let output = state.output_path(info);
     if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent).map_err(|e| RepairError::new(format!("mkdir {}: {}", parent.display(), e)))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| RepairError::new(format!("mkdir {}: {}", parent.display(), e)))?;
     }
     // Direct in-place write (the accepted CP3 contract for regenerable state).
     if fs::write(&output, contents).is_err() {
@@ -220,10 +245,23 @@ fn write_primary_output(
         let mut perms = fs::metadata(&output)
             .map_err(|_| RepairError::new(format!("cannot write {}", output.display())))?
             .permissions();
-        perms.set_readonly(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Equivalent to std's set_readonly(false) on Unix (adds all write
+            // bits, 0o222); expressed explicitly so the retry is deterministic.
+            perms.set_mode(perms.mode() | 0o222);
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows: clearing the read-only attribute makes the file writable.
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+        }
         let _ = fs::set_permissions(&output, perms);
-        fs::write(&output, contents)
-            .map_err(|e| RepairError::new(format!("failed to write {}: {}", output.display(), e)))?;
+        fs::write(&output, contents).map_err(|e| {
+            RepairError::new(format!("failed to write {}: {}", output.display(), e))
+        })?;
     }
     // Preserve the source content file's permissions (reference write_direct_file).
     let content = state.content_path(info);
@@ -255,9 +293,19 @@ fn write_page_info(
     json.push_str("\",\n  \"output\": \"");
     json.push_str(&escape(&output_name));
     json.push_str("\",\n  \"minify\": false,\n  \"minify-version\": 0,\n  \"pagination\": ");
-    json.push_str(if info.paginate.is_some() { "true" } else { "false" });
+    json.push_str(if info.paginate.is_some() {
+        "true"
+    } else {
+        "false"
+    });
     json.push_str(",\n  \"pagination-items-per-page\": ");
-    json.push_str(&info.paginate.as_ref().map(|p| p.items_per_page.to_string()).unwrap_or_else(|| "0".to_string()));
+    json.push_str(
+        &info
+            .paginate
+            .as_ref()
+            .map(|p| p.items_per_page.to_string())
+            .unwrap_or_else(|| "0".to_string()),
+    );
     json.push_str(",\n  \"pagination-template\": \"\",\n  \"pagination-separator\": \"\",\n  \"pagination-pages\": ");
     json.push_str(if info.paginate.is_some() { "1" } else { "0" });
     json.push_str(",\n  \"dependencies\": [");
@@ -293,9 +341,8 @@ fn write_page_info(
         fs::create_dir_all(parent)
             .map_err(|e| RepairError::new(format!("mkdir {}: {}", parent.display(), e)))?;
     }
-    fs::write(&info_path, json).map_err(|e| {
-        RepairError::new(format!("failed to write {}: {}", info_path.display(), e))
-    })
+    fs::write(&info_path, json)
+        .map_err(|e| RepairError::new(format!("failed to write {}: {}", info_path.display(), e)))
 }
 
 /// `.nift/<output-relative-without-ext>.info.json` (reference
@@ -307,7 +354,10 @@ fn info_path_of(state: &ProjectState, info: &crate::project::TrackedInfo) -> Pat
         Some(dot) if dot > 0 => &relative[..dot],
         _ => &relative[..],
     };
-    state.root().join(".nift").join(format!("{without_ext}.info.json"))
+    state
+        .root()
+        .join(".nift")
+        .join(format!("{without_ext}.info.json"))
 }
 
 /// Ownership-aware sweep (reference `ProjectInfo::repair_derived_state`):

@@ -68,8 +68,7 @@ impl CaseEnvGuard {
     }
 
     fn set(&mut self, key: &str, value: &str) {
-        self.saved
-            .push((key.to_string(), std::env::var(key).ok()));
+        self.saved.push((key.to_string(), std::env::var(key).ok()));
         std::env::set_var(key, value);
     }
 }
@@ -410,7 +409,11 @@ fn pagination_renders_complete_page_set() {
         r#"{"tracked":[{"name":"blog","title":"Blog","template":"templates/template.html","paginate":{"items-per-page":1}}]}"#,
     )
     .unwrap();
-    std::fs::write(dir.join("templates/template.html"), "<main>$[title]</main>\n@content\n").unwrap();
+    std::fs::write(
+        dir.join("templates/template.html"),
+        "<main>$[title]</main>\n@content\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("content/blog.html"),
         "@item{one}@item{two}@item{three}@paginate\n",
@@ -426,7 +429,10 @@ fn pagination_renders_complete_page_set() {
     let result = engine.render_page("blog", &Context::new()).unwrap();
 
     // output = page 1 (primary).
-    assert_eq!(result.output, "<main>Blog</main>\n<section>page 1/3</section>\n\n");
+    assert_eq!(
+        result.output,
+        "<main>Blog</main>\n<section>page 1/3</section>\n\n"
+    );
     // complete pagination: pages 2..N ascending.
     let pages: Vec<(usize, &str)> = result
         .pagination
@@ -462,11 +468,18 @@ fn non_paginated_render_has_empty_pagination() {
         r#"{"tracked":[{"name":"/","title":"Home","template":"templates/template.html"}]}"#,
     )
     .unwrap();
-    std::fs::write(dir.join("templates/template.html"), "<main>@content</main>\n").unwrap();
+    std::fs::write(
+        dir.join("templates/template.html"),
+        "<main>@content</main>\n",
+    )
+    .unwrap();
     std::fs::write(dir.join("content/index.html"), "<p>home</p>\n").unwrap();
     let engine = Engine::open(&dir).unwrap();
     let result = engine.render_page("/", &Context::new()).unwrap();
     assert_eq!(result.output, "<main><p>home</p></main>\n");
-    assert!(result.pagination.is_empty(), "non-paginated render has empty pagination");
+    assert!(
+        result.pagination.is_empty(),
+        "non-paginated render has empty pagination"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

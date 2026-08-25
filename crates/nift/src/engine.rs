@@ -414,14 +414,20 @@ impl<'a> RenderHost for EngineHost<'a> {
         if let Some(loader) = &self.engine.loader {
             // A host Error is treated as "exists" so the subsequent read
             // surfaces the distinct host-error diagnostic.
-            return !matches!(loader(&crate::parser::generic(path)), crate::host::HostResult::NotFound);
+            return !matches!(
+                loader(&crate::parser::generic(path)),
+                crate::host::HostResult::NotFound
+            );
         }
         path.exists()
     }
 
     fn source_readable(&self, path: &Path) -> bool {
         if let Some(loader) = &self.engine.loader {
-            return !matches!(loader(&crate::parser::generic(path)), crate::host::HostResult::NotFound);
+            return !matches!(
+                loader(&crate::parser::generic(path)),
+                crate::host::HostResult::NotFound
+            );
         }
         path.is_file()
     }

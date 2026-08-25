@@ -29,13 +29,25 @@ fn parses_empty_structures() {
 }
 
 #[test]
+#[allow(clippy::approx_constant)]
 fn parses_nested_document() {
-    let doc = r#"{"name":"nift","tags":["json","rust"],"meta":{"ok":true,"n":42,"pi":3.14,"none":null}}"#;
+    let doc =
+        r#"{"name":"nift","tags":["json","rust"],"meta":{"ok":true,"n":42,"pi":3.14,"none":null}}"#;
     let value = parse(doc).unwrap();
     let object = value.as_object().unwrap();
     assert_eq!(object.get("name").unwrap().as_str(), Some("nift"));
     assert_eq!(object.get("tags").unwrap().as_array().unwrap().len(), 2);
-    assert_eq!(object.get("meta").unwrap().as_object().unwrap().get("pi").unwrap().as_number(), Some(3.14));
+    assert_eq!(
+        object
+            .get("meta")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .get("pi")
+            .unwrap()
+            .as_number(),
+        Some(3.14)
+    );
 }
 
 #[test]
@@ -54,9 +66,26 @@ fn parses_escapes_and_unicode() {
 #[test]
 fn rejects_malformed() {
     for bad in [
-        "", "{", "[", "\"unterminated", "tru", "nul", "01", "1.", ".5",
-        "{\"a\":}", "[1,]", "{\"a\" 1}", "truX", "{'a':1}", "1 2", "}", "]",
-        "\"\\x\"", "\"\\u12\"", "\"\\uZZZZ\"",
+        "",
+        "{",
+        "[",
+        "\"unterminated",
+        "tru",
+        "nul",
+        "01",
+        "1.",
+        ".5",
+        "{\"a\":}",
+        "[1,]",
+        "{\"a\" 1}",
+        "truX",
+        "{'a':1}",
+        "1 2",
+        "}",
+        "]",
+        "\"\\x\"",
+        "\"\\u12\"",
+        "\"\\uZZZZ\"",
     ] {
         assert!(parse(bad).is_err(), "expected rejection for {bad:?}");
     }
@@ -90,7 +119,10 @@ fn number_boundaries() {
     assert_eq!(parse("1.5").unwrap().as_number(), Some(1.5));
     assert_eq!(parse("1e10").unwrap().as_number(), Some(1e10));
     // Non-finite results are rejected by the reference (finite-range rule).
-    assert!(parse("1e999").is_err(), "non-finite number must be rejected");
+    assert!(
+        parse("1e999").is_err(),
+        "non-finite number must be rejected"
+    );
 }
 
 // --- stringify / round-trip property ----------------------------------------
@@ -153,9 +185,25 @@ fn schema_accept_and_reject() {
 #[test]
 fn adversarial_inputs_never_panic() {
     let corpus = [
-        "{{{{{{{{{{", "]]]][[[[", "\"\\u", "1e", "-", "--1", "{\"\":}", "[1,,2]",
-        "\"\\ud800\"", "\"\\ud800\\ud800\"", "\x00\x01\x02", "\"a", "tru", "nulll",
-        "{\"a\":1,\"a\":1}", "[[[]]]", "1e999999999", "\"\\\"", "{\"a\" : 1}",
+        "{{{{{{{{{{",
+        "]]]][[[[",
+        "\"\\u",
+        "1e",
+        "-",
+        "--1",
+        "{\"\":}",
+        "[1,,2]",
+        "\"\\ud800\"",
+        "\"\\ud800\\ud800\"",
+        "\x00\x01\x02",
+        "\"a",
+        "tru",
+        "nulll",
+        "{\"a\":1,\"a\":1}",
+        "[[[]]]",
+        "1e999999999",
+        "\"\\\"",
+        "{\"a\" : 1}",
     ];
     for input in corpus {
         let _ = parse(input); // must not panic
