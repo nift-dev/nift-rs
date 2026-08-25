@@ -61,12 +61,10 @@ the pagination-surplus sweep and paginated convergence tests.
 
 ## Full Rust test suite
 
-cargo test: all suites pass EXCEPT one PRE-EXISTING failure
-(`corpus_parity_pages_match_goldens` in nr8_project_engine.rs, "getenv// output
-does not match the golden") that fails identically WITHOUT the repair change
-(verified via git stash). It is corpus drift: the Rust copy of the getenv
-golden is stale relative to the current C++ behaviour. Unrelated to this
-checkpoint; flagged for corpus re-sync.
+cargo test: all suites pass (181 tests, 0 failures). The one previously-failing
+corpus test (`corpus_parity_pages_match_goldens`, getenv case) was resolved in
+CP5.1: its root cause was a test-harness gap, not stale goldens or wrong Rust
+behaviour (see CP5.1-EMBED-BOUNDARY-REVIEW.md).
 
 ## Commit / hygiene
 

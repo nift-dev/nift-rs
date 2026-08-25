@@ -34,6 +34,45 @@ fn sorted(entries: &std::collections::BTreeSet<String>) -> Vec<String> {
     entries.iter().cloned().collect()
 }
 
+/// Read `<case>/expected.json` and inject its declared `env` object into the
+/// process environment (flat `{"KEY":"value"}` shape; matches the C++
+/// conformance driver's `extra_env` handling).
+fn inject_case_env(case_dir: &Path) {
+    let Ok(text) = std::fs::read_to_string(case_dir.join("expected.json")) else {
+        return;
+    };
+    let Some(env_pos) = text.find("\"env\"") else {
+        return;
+    };
+    let rest = &text[env_pos..];
+    let Some(open) = rest.find('{') else {
+        return;
+    };
+    let close = rest[open + 1..]
+        .find('}')
+        .map(|i| open + 1 + i)
+        .unwrap_or(rest.len());
+    let body = &rest[open + 1..close];
+    for pair in body.split(',') {
+        let pair = pair.trim();
+        let Some(colon) = pair.find(':') else {
+            continue;
+        };
+        let key = unquote(pair[..colon].trim());
+        let value = unquote(pair[colon + 1..].trim());
+        if !key.is_empty() {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
+fn unquote(fragment: &str) -> String {
+    let fragment = fragment.trim();
+    let fragment = fragment.strip_prefix('"').unwrap_or(fragment);
+    let fragment = fragment.strip_suffix('"').unwrap_or(fragment);
+    fragment.to_string()
+}
+
 fn page_base(name: &str) -> String {
     if name == "/" {
         "ROOT".to_string()
@@ -50,6 +89,12 @@ fn corpus_parity_pages_match_goldens() {
         ("getenv", &["/"]),
     ];
     for (case_id, pages) in cases {
+        // Mirror the C++ conformance driver: each case's expected.json may
+        // declare an injected environment (e.g. the getenv case's
+        // PA_CONFORMANCE_ENV), which must be present for @getenv renders.
+        // The declared env is a flat object of strings, so a minimal scanner
+        // suffices (avoids pulling a JSON dependency into the test harness).
+        inject_case_env(&corpus_case(case_id));
         let project = corpus_case(case_id).join("project");
         let engine = Engine::open(&project)
             .unwrap_or_else(|e| panic!("{case_id}: open failed: {:?}", e.message));
