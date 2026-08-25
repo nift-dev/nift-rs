@@ -13,6 +13,20 @@ use crate::value::Value;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+/// The outcome of a host seam (loader / environment provider) lookup
+/// (CP10.2, mirroring C++ `nift::HostResult`).
+///
+/// A host can supply a value (possibly empty), report the value absent
+/// ("missing source" / "environment unset"), or report a controlled host
+/// FAILURE. A failure becomes a rendering error: the RenderResult fails with
+/// the diagnostic, regardless of which engine thread invoked the seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostResult {
+    Found(String),
+    NotFound,
+    Error(String),
+}
+
 /// Per-render page identity: the page metadata the renderer exposes (title,
 /// name, template-path) and the identity used for content/output geometry.
 ///
@@ -83,10 +97,14 @@ pub trait RenderHost {
         })
     }
 
-    /// Environment lookup for `@getenv` (nullopt means unset). The default
-    /// reads the process environment.
-    fn environment(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok()
+    /// Environment lookup for `@getenv`. `NotFound` means unset; `Error` is a
+    /// controlled host failure that fails the render with the diagnostic. The
+    /// default reads the process environment.
+    fn environment(&self, name: &str) -> HostResult {
+        match std::env::var(name) {
+            Ok(value) => HostResult::Found(value),
+            Err(_) => HostResult::NotFound,
+        }
     }
 
     /// Source existence as seen by this host.

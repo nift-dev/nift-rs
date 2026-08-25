@@ -143,11 +143,14 @@ impl<'a> RenderHost for InMemoryHost<'a> {
         }
     }
 
-    fn environment(&self, name: &str) -> Option<String> {
-        self.env
-            .get(name)
-            .cloned()
-            .or_else(|| std::env::var(name).ok())
+    fn environment(&self, name: &str) -> crate::host::HostResult {
+        if let Some(value) = self.env.get(name).cloned() {
+            return crate::host::HostResult::Found(value);
+        }
+        match std::env::var(name) {
+            Ok(value) => crate::host::HostResult::Found(value),
+            Err(_) => crate::host::HostResult::NotFound,
+        }
     }
 
     fn source_exists(&self, path: &Path) -> bool {
@@ -273,11 +276,14 @@ impl<'a> RenderHost for FilesystemHost<'a> {
         })
     }
 
-    fn environment(&self, name: &str) -> Option<String> {
-        self.env
-            .get(name)
-            .cloned()
-            .or_else(|| std::env::var(name).ok())
+    fn environment(&self, name: &str) -> crate::host::HostResult {
+        if let Some(value) = self.env.get(name).cloned() {
+            return crate::host::HostResult::Found(value);
+        }
+        match std::env::var(name) {
+            Ok(value) => crate::host::HostResult::Found(value),
+            Err(_) => crate::host::HostResult::NotFound,
+        }
     }
 
     fn source_exists(&self, path: &Path) -> bool {

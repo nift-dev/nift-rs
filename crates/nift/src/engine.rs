@@ -24,10 +24,10 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// A custom source loader: `path -> Option<source>`.
-type SourceLoader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-/// A custom environment provider: `name -> Option<value>`.
-type EnvironmentProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// A custom source loader: `path -> HostResult` (value / absent / host error).
+type SourceLoader = Arc<dyn Fn(&str) -> crate::host::HostResult + Send + Sync>;
+/// A custom environment provider: `name -> HostResult`.
+type EnvironmentProvider = Arc<dyn Fn(&str) -> crate::host::HostResult + Send + Sync>;
 
 /// The public Embedded Nift rendering engine.
 pub struct Engine {
@@ -82,18 +82,44 @@ impl Engine {
     /// Custom source loader: `path -> Option<source>`. When set, all source
     /// reads (content, template, `@input`, `@json`, `@dep`) route through it.
     /// It must be thread-safe (called concurrently by renders).
+    /// Custom source loader (convenience form without an error channel: value
+    /// -> Found, None -> NotFound).
     pub fn set_loader<F>(&mut self, loader: F)
     where
         F: Fn(&str) -> Option<String> + Send + Sync + 'static,
     {
+        self.loader = Some(Arc::new(move |path| match loader(path) {
+            Some(value) => crate::host::HostResult::Found(value),
+            None => crate::host::HostResult::NotFound,
+        }));
+    }
+
+    /// Custom source loader with the full host-result contract (Found /
+    /// NotFound / Error); a host Error fails the render with the diagnostic.
+    pub fn set_loader_result<F>(&mut self, loader: F)
+    where
+        F: Fn(&str) -> crate::host::HostResult + Send + Sync + 'static,
+    {
         self.loader = Some(Arc::new(loader));
     }
 
-    /// Custom environment provider for `@getenv` (`nullopt` means unset).
-    /// When absent, the process environment is read.
+    /// Custom environment provider for `@getenv` (convenience form without an
+    /// error channel; None means unset).
     pub fn set_environment_provider<F>(&mut self, provider: F)
     where
         F: Fn(&str) -> Option<String> + Send + Sync + 'static,
+    {
+        self.environment_provider = Some(Arc::new(move |name| match provider(name) {
+            Some(value) => crate::host::HostResult::Found(value),
+            None => crate::host::HostResult::NotFound,
+        }));
+    }
+
+    /// Custom environment provider with the full host-result contract; a host
+    /// Error fails the render with the diagnostic.
+    pub fn set_environment_provider_result<F>(&mut self, provider: F)
+    where
+        F: Fn(&str) -> crate::host::HostResult + Send + Sync + 'static,
     {
         self.environment_provider = Some(Arc::new(provider));
     }
@@ -354,12 +380,16 @@ impl<'a> RenderHost for EngineHost<'a> {
             // `/` separators even on Windows. Using native separators here
             // would diverge from the C++ harness keys on Windows.
             let key = crate::parser::generic(path);
-            return loader(&key).map(Cow::Owned).ok_or_else(|| {
-                RenderError::new(
+            return match loader(&key) {
+                crate::host::HostResult::Found(value) => Ok(Cow::Owned(value)),
+                crate::host::HostResult::Error(message) => {
+                    Err(RenderError::new(ErrorKind::Render, message))
+                }
+                crate::host::HostResult::NotFound => Err(RenderError::new(
                     ErrorKind::MissingSource,
                     format!("source file is not readable: {}", path.display()),
-                )
-            });
+                )),
+            };
         }
         match std::fs::read_to_string(path) {
             Ok(contents) => Ok(Cow::Owned(contents)),
@@ -370,23 +400,28 @@ impl<'a> RenderHost for EngineHost<'a> {
         }
     }
 
-    fn environment(&self, name: &str) -> Option<String> {
+    fn environment(&self, name: &str) -> crate::host::HostResult {
         if let Some(provider) = &self.engine.environment_provider {
             return provider(name);
         }
-        std::env::var(name).ok()
+        match std::env::var(name) {
+            Ok(value) => crate::host::HostResult::Found(value),
+            Err(_) => crate::host::HostResult::NotFound,
+        }
     }
 
     fn source_exists(&self, path: &Path) -> bool {
-        if self.engine.loader.is_some() {
-            return self.read_source(path).is_ok();
+        if let Some(loader) = &self.engine.loader {
+            // A host Error is treated as "exists" so the subsequent read
+            // surfaces the distinct host-error diagnostic.
+            return !matches!(loader(&crate::parser::generic(path)), crate::host::HostResult::NotFound);
         }
         path.exists()
     }
 
     fn source_readable(&self, path: &Path) -> bool {
-        if self.engine.loader.is_some() {
-            return self.read_source(path).is_ok();
+        if let Some(loader) = &self.engine.loader {
+            return !matches!(loader(&crate::parser::generic(path)), crate::host::HostResult::NotFound);
         }
         path.is_file()
     }

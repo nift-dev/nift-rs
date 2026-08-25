@@ -21,7 +21,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 /// A custom environment lookup: `name -> Option<value>` (nullopt means unset).
-type EnvironmentProvider = dyn Fn(&str) -> Option<String> + Send + Sync;
+type EnvironmentProvider = dyn Fn(&str) -> crate::host::HostResult + Send + Sync;
 
 /// A per-render host over an immutable [`ProjectState`] snapshot.
 pub struct ProjectHost<'a> {
@@ -115,11 +115,14 @@ impl RenderHost for ProjectHost<'_> {
             .map_err(|error| RenderError::new(ErrorKind::Render, error.message))
     }
 
-    fn environment(&self, name: &str) -> Option<String> {
+    fn environment(&self, name: &str) -> crate::host::HostResult {
         if let Some(provider) = self.environment_provider {
             return provider(name);
         }
-        std::env::var(name).ok()
+        match std::env::var(name) {
+            Ok(value) => crate::host::HostResult::Found(value),
+            Err(_) => crate::host::HostResult::NotFound,
+        }
     }
 
     fn source_exists(&self, path: &Path) -> bool {

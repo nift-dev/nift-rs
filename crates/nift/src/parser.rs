@@ -1817,8 +1817,18 @@ fn parse(
                 }
                 let resolved = interpolate_parameter(state, host, identity, &parameters[0])
                     .map_err(|e| error_at(ErrorKind::Render, e.message, text, i, source_path))?;
-                if let Some(value) = host.environment(&resolved) {
-                    output += &value;
+                match host.environment(&resolved) {
+                    crate::host::HostResult::Found(value) => output += &value,
+                    crate::host::HostResult::Error(message) => {
+                        return Err(error_at(
+                            ErrorKind::Render,
+                            format!("getenv: {message}"),
+                            text,
+                            i,
+                            source_path,
+                        ))
+                    }
+                    crate::host::HostResult::NotFound => {}
                 }
                 i = end;
                 continue;
