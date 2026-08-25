@@ -65,6 +65,7 @@ pub mod host;
 pub mod hosts;
 pub mod parser;
 pub mod project;
+pub mod repair;
 pub mod project_host;
 pub mod result;
 pub mod source;
