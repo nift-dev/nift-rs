@@ -401,6 +401,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "minify"
+version = "0.1.0"
+dependencies = [
+ "jsonic",
+]
+
+[[package]]
 name = "minijinja"
 version = "2.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -424,6 +431,7 @@ dependencies = [
  "chrono",
  "indexmap",
  "jsonic",
+ "minify",
  "minijinja",
  "regex",
  "serde_json",

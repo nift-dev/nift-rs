@@ -134,24 +134,21 @@ pre-Embed Nift  ↔  Embed-era Nift       (regression suites, below)
 If final rendered output differs, the layer corpora localize the disagreement
 to JSON, minify, template semantics, or host/project semantics.
 
-## Regression-suite destinations (concrete, in the workspace)
+## Regression-suite destinations (revised: ONE implementation-neutral suite)
 
-- `nift-regression-suite` — canonical pre-Embed suite; UNTOUCHED during the
+- `nift-regression-suite` — canonical pre-Embed baseline; UNTOUCHED during the
   experiment; preserve via a permanent `pre-embed-baseline` tag/commit.
-- `nift-embed-regression-suite` (local fork at the canonical commit) — the C++
-  suite, expanded with Embed-era guarantees: new build/info CLI grammar,
-  `.unfinished` ownership/recovery, zero-mutation failure handling,
-  direct-write recovery, `build --repair`, pagination result changes, and later
-  C ABI/binding cases.
-- `nift-rs-regression-suite` (empty repo) — a Rust-NATIVE regression suite
-  testing equivalent contracts (not a mechanical copy of the C++ shell
-  scripts); same behavioural proofs where the contract is behavioural, better
-  Rust-native structure where appropriate.
+- `nift-embed-regression-suite` (local fork at the canonical commit) — the
+  implementation-neutral expanded suite: the behavioural cases describe Nift's
+  CONTRACT, not a particular implementation, and it eventually runs against
+  BOTH C++ Nift and nift-rs. Where CLI surfaces are compatible, the same tests
+  select the binary under test (e.g. `NIFT_BIN`); where Embed/library behaviour
+  has no CLI command, tiny language-specific harnesses expose the same neutral
+  request/result protocol. NO separate `nift-rs-regression-suite` (removed from
+  the roadmap - its empty repository remains unused).
 
-Eventually: run the preserved pre-Embed suite against both pre-Embed and
-Embed-era Nift (historical compatibility), plus the expanded suites (new
-guarantees); after Embed merges, merge the approved C++ regression additions
-back into `nift-regression-suite`.
+Layer-specific conformance stays separate from the regression suites:
+Jsonic++ <-> jsonic-rs, Minify++ <-> minify-rs, C++ Embed <-> nift-rs.
 
 ## Implementation checkpoint sequence
 
@@ -159,12 +156,13 @@ back into `nift-regression-suite`.
 1. jsonic-rs design/implementation        2. Jsonic++ ↔ jsonic-rs conformance
 3. minify-rs design/implementation        4. Minify++ ↔ minify-rs conformance
 5. nift-rs uses both                      6. complete pagination Embed API
-7. populate nift-rs-regression-suite      8. expand nift-embed-regression-suite
+7. expand nift-embed-regression-suite to be implementation-neutral
+8. run the same suite against C++ and Rust
 9. C++ ↔ Rust Embed conformance           10. C ABI
 11. first production binding              12. binding conformance
 13. final performance/sanitizer/platform campaign
 14. merge nift-embed → nift
-15. merge approved C++ regression additions → nift-regression-suite
+15. merge approved regression additions → nift-regression-suite
 16. website + release
 ```
 

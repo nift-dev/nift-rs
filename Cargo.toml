@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/jsonic", "crates/nift"]
+members = ["crates/jsonic", "crates/minify", "crates/nift"]
 
 [workspace.package]
 edition = "2021"

@@ -1,0 +1,12 @@
+[package]
+name = "minify"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native Rust multi-format minifier (Minify++ behavioural contract): HTML, CSS, JavaScript, JSX, JSON, XML, SVG"
+
+[dependencies]
+# JSON format validation/whitespace stripping reuses the native Rust Jsonic
+# (consistent with the layered stack).
+jsonic = { path = "../jsonic" }

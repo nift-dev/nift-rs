@@ -450,12 +450,10 @@ fn valid_tracked_name(name: &str) -> bool {
     !path.is_absolute() && !has_parent_component(name)
 }
 
-/// `minify::format_for_extension` supported extensions, lowercased.
+/// The native Rust Minify++ implementation's supported extensions
+/// (single source of truth: `minify::format_for_extension`).
 fn supported_minify_ext(extension: &str) -> bool {
-    matches!(
-        extension.to_ascii_lowercase().as_str(),
-        ".html" | ".htm" | ".css" | ".js" | ".mjs" | ".cjs" | ".jsx" | ".json" | ".xml" | ".svg"
-    )
+    minify::format_for_extension(extension).is_some()
 }
 
 /// `filesystem::weakly_canonical`: resolve symlinks in the existing prefix,

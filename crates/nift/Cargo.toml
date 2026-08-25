@@ -20,6 +20,8 @@ workspace = true
 indexmap = "2"
 # Native Rust Jsonic (replaces nift private JSON parser/value).
 jsonic = { path = "../jsonic" }
+# Native Rust Minify++ (explicit/project minification; not a render default).
+minify = { path = "../minify" }
 # JSON Schema `pattern` keyword (portable agreement with the reference's
 # std::regex_search for the supported corpus; RE2-style syntax).
 regex = "1"
