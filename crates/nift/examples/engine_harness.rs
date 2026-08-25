@@ -105,10 +105,10 @@ fn main() {
     // failure so the render fails with the diagnostic, identically on the
     // caller thread and pagination workers.
     if seam == "env-error" {
-        engine.set_environment_provider_result(|_| nift::host::HostResult::Error("host callback failed".to_string()));
+        engine.set_environment_provider_result(|_| nift::host::HostResult::Error("host exploded".to_string()));
     }
     if seam == "loader-error" {
-        engine.set_loader_result(|_| nift::host::HostResult::Error("host callback failed".to_string()));
+        engine.set_loader_result(|_| nift::host::HostResult::Error("host exploded".to_string()));
     }
     for line in io::stdin().lock().lines() {
         let line = line.expect("stdin line");
