@@ -131,6 +131,10 @@ impl Default for ProjectConfig {
 /// invalid project state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectErrorKind {
+    /// The root is not a Nift project (`.nift/config.json` and/or
+    /// `.nift/tracked.json` absent; no global config participates). Corpus
+    /// class `not-a-project`.
+    NotProject,
     /// Syntax-invalid `config.json` (corpus class `invalid-config-json`).
     ConfigJson,
     /// Unknown config key (corpus class `unknown-config-key`).
@@ -156,6 +160,7 @@ impl ProjectErrorKind {
     /// The corpus semantic rejection class for this error.
     pub fn corpus_class(self) -> &'static str {
         match self {
+            ProjectErrorKind::NotProject => "not-a-project",
             ProjectErrorKind::ConfigJson => "invalid-config-json",
             ProjectErrorKind::ConfigKey => "unknown-config-key",
             ProjectErrorKind::ConfigValue => "invalid-config-json",
@@ -215,6 +220,19 @@ impl ProjectState {
     /// names, conflicting paths) returns an error and never writes to disk.
     pub fn open(root: impl AsRef<Path>) -> Result<ProjectState, ProjectError> {
         let candidate_root = absolute_normalized(root.as_ref());
+        // A root is a Nift project only where the relevant project state
+        // exists: BOTH .nift/config.json and .nift/tracked.json. No global
+        // config participates; in particular a historical ~/.nift global
+        // config dir (config.json with old keys, no tracked.json) must never
+        // be parsed.
+        if !candidate_root.join(".nift/config.json").exists()
+            || !candidate_root.join(".nift/tracked.json").exists()
+        {
+            return Err(ProjectError::new(
+                ProjectErrorKind::NotProject,
+                "not a Nift project",
+            ));
+        }
         let mut config = ProjectConfig::default();
         load_config(&candidate_root, &mut config)?;
         let mut tracked = Vec::new();
@@ -640,6 +658,14 @@ fn read_string_field(
 
 fn load_config(root: &Path, config: &mut ProjectConfig) -> Result<(), ProjectError> {
     let path = root.join(".nift/config.json");
+    // A root without .nift/config.json is not a Nift project at all; it must
+    // never be reported as a config diagnostic (no global config participates).
+    if !path.exists() {
+        return Err(ProjectError::new(
+            ProjectErrorKind::NotProject,
+            "not a Nift project",
+        ));
+    }
     let document = match load_json_document(&path) {
         Ok(document) => document,
         Err(parse_error) => {
@@ -849,10 +875,13 @@ fn load_tracking(
     tracked: &mut Vec<TrackedInfo>,
 ) -> Result<(), ProjectError> {
     let path = root.join(".nift/tracked.json");
+    // A root without .nift/tracked.json lacks the relevant project state; it is
+    // not a Nift project (the historical ~/.nift global config dir has only
+    // config.json and must not be treated as a project).
     if !path.exists() {
         return Err(ProjectError::new(
-            ProjectErrorKind::TrackingJson,
-            "invalid tracked.json (file does not exist)",
+            ProjectErrorKind::NotProject,
+            "not a Nift project",
         ));
     }
     let source = std::fs::read_to_string(&path).map_err(|_| {
