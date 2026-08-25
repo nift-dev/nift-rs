@@ -38,23 +38,44 @@ unsafe). Standalone and independently releasable.
 `jsonic` (JSON validation). No serde; no unsafe (workspace `unsafe_code =
 forbid`).
 
-## Conformance
+## Conformance — differential gate (126/126 byte-for-byte)
 
-Key `minify_smoke.cpp` semantic cases ported as Rust tests (css basic/license/
-strings/calc spacing, xml whitespace+CDATA+comment, svg comment, javascript
-ASI + comments, json whitespace+invalid, jsx boundary preservation) plus
-idempotence (minify(minify(x)) == minify(x)) and a no-panic adversarial corpus
-over all seven formats. The remaining Minify++ corpus (html tag-internal edge
-cases, JSX/TSX generic-arrow disambiguation, css postcss semantics, the
-shell/fuzz suites) is mapped for follow-up; per-format output is validated
-against the smoke expectations that are ported.
+`scripts/minify_differential.py` (permanent gate) sends the same 126 corpus
+inputs (every `minify_smoke.cpp` semantic case, plus malformed/adversarial
+inputs) through BOTH the C++ reference (`/tmp/minify_cpp`, built from
+minifypp/Minify.cpp) and minify-rs (a CLI example), comparing output
+byte-for-byte. **126/126 cases match.**
 
-## Semantic differences discovered
+Porting against the full corpus exposed and fixed six real gaps in the first
+pass (this is why the full corpus matters):
+1. JSX was copying regions verbatim instead of recursively minifying
+   `{...}` expressions and preserving JSX text (`https://` was being treated
+   as a JS comment). Replaced with a full JSX region processor (tags,
+   attribute-brace expressions, nested JSX, fragments, self-closing tags,
+   TSX-generic-arrow disambiguation).
+2. JS `can_start_regex` was wrong after operators (`=`, `:`, etc.) and blocks;
+   regex flags (`/[/]/g`) were dropped. Ported the block-brace stack and the
+   operator/brace can_start_regex rules.
+3. JS/HTML/XML/CSS non-ASCII bytes were pushed as single chars, corrupting
+   UTF-8 (e.g. `café`). Now copies full characters; `word_char` returns true
+   for `>= 0x80` so identifier-adjacent whitespace is preserved.
+4. HTML/XML whitespace emission indexed the INPUT by the output length
+   (`bytes[output.len()-1]`) instead of the output's last byte, dropping
+   inter-element/inside-tag spaces. Fixed.
+5. JS label `label:{}` block classification used the wrong statement-boundary
+   check (looked at the char before `:` instead of before the identifier).
+   Fixed.
+6. CSS `css_needs_space`/string handling for non-ASCII. Fixed.
 
-- The C++ `css` keeps a trailing `;` before the closing `}` (only whitespace is
-  trimmed); the Rust port matches the reference (the smoke case
-  `body{color:red;margin:0 10px;}` confirms this is the contract, not a bug).
-- No other reference-vs-Rust divergence was found in the ported surface.
+Semantic difference confirmed (NOT a bug): CSS keeps a trailing `;` before the
+closing `}` (only whitespace is trimmed) - the smoke case
+`body{color:red;margin:0 10px;}` confirms this is the reference contract.
+
+## Additional evidence
+
+- Idempotence: minify(minify(x)) == minify(x) over all seven formats.
+- No-panic adversarial corpus over all seven formats.
+- The minify_smoke.cpp idempotence cases (json/css/html/js/jsx/xml/svg) pass.
 
 ## nift-rs integration
 
@@ -69,24 +90,26 @@ against the smoke expectations that are ported.
 
 ## Complete nift-rs result
 
-Full workspace: **204 tests, 0 failures** (197 prior + 7 minify).
+Full workspace: **205 tests, 0 failures** (197 prior + 8 minify incl. the
+per-format benchmark test).
 
-## Per-format benchmark (methodology: input throughput + output size, NOT
-incomparable output-byte division; 50k docs, release)
+## C++ vs Rust per-format benchmark (in-process, same inputs, same options,
+release builds, 200k iterations)
 
 ```text
-Html:        182.2 MiB/s input,   60 bytes/doc output
-Css:         340.9 MiB/s input,   49 bytes/doc output
-Json:        108.1 MiB/s input,   33 bytes/doc output
-Xml:         285.1 MiB/s input,   33 bytes/doc output
-Svg:         352.8 MiB/s input,   44 bytes/doc output
-JavaScript:  149.2 MiB/s input,   28 bytes/doc output
-Jsx:         143.4 MiB/s input,   40 bytes/doc output
+format   C++ input MiB/s   Rust input MiB/s   ratio (Rust/C++)   output bytes/iter (identical)
+Html        188.2              229.1            1.22x faster          60
+Css         264.0              303.6            1.15x faster          49
+Json         91.0              115.7            1.27x faster          33
+Xml         140.2              300.1            2.14x faster          33
+Svg         268.4              366.1            1.36x faster          44
+JavaScript  104.8              216.1            2.06x faster          28
+Jsx         117.2              235.3            2.01x faster          44
 ```
 
-The Minify++ per-format comparison (same corpus + options) is the recorded
-follow-up (the ported smoke expectations already confirm output equivalence for
-the covered cases); the Rust throughputs establish no catastrophic regression.
+Same per-format inputs/options; output sizes are byte-identical between
+implementations, so the input-throughput comparison is apples-to-apples. Rust
+is faster on every format (no large unexplained regression - the reverse).
 
 ## Roadmap correction applied
 
