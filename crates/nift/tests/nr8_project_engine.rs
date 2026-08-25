@@ -34,43 +34,55 @@ fn sorted(entries: &std::collections::BTreeSet<String>) -> Vec<String> {
     entries.iter().cloned().collect()
 }
 
-/// Read `<case>/expected.json` and inject its declared `env` object into the
-/// process environment (flat `{"KEY":"value"}` shape; matches the C++
-/// conformance driver's `extra_env` handling).
-fn inject_case_env(case_dir: &Path) {
-    let Ok(text) = std::fs::read_to_string(case_dir.join("expected.json")) else {
-        return;
-    };
-    let Some(env_pos) = text.find("\"env\"") else {
-        return;
-    };
-    let rest = &text[env_pos..];
-    let Some(open) = rest.find('{') else {
-        return;
-    };
-    let close = rest[open + 1..]
-        .find('}')
-        .map(|i| open + 1 + i)
-        .unwrap_or(rest.len());
-    let body = &rest[open + 1..close];
-    for pair in body.split(',') {
-        let pair = pair.trim();
-        let Some(colon) = pair.find(':') else {
-            continue;
+/// RAII guard for process-global environment mutation in corpus tests.
+///
+/// Saves the previous value of each injected key, sets the declared values,
+/// and restores the exact prior state on Drop (a previously-absent variable is
+/// removed again). Restoration runs even if a render assertion panics, so
+/// corpus cases cannot leak environment state or become order-dependent.
+struct CaseEnvGuard {
+    saved: Vec<(String, Option<String>)>,
+}
+
+impl CaseEnvGuard {
+    /// Parse `<case>/expected.json` with serde_json (the file is real JSON;
+    /// values may contain commas, colons, escapes, etc.) and inject its
+    /// declared `env` object into the process environment.
+    fn from_expected_json(case_dir: &Path) -> Self {
+        let mut guard = Self { saved: Vec::new() };
+        let Ok(text) = std::fs::read_to_string(case_dir.join("expected.json")) else {
+            return guard;
         };
-        let key = unquote(pair[..colon].trim());
-        let value = unquote(pair[colon + 1..].trim());
-        if !key.is_empty() {
-            std::env::set_var(key, value);
+        let Ok(doc): Result<serde_json::Value, _> = serde_json::from_str(&text) else {
+            return guard;
+        };
+        let Some(env) = doc.get("env").and_then(|v| v.as_object()) else {
+            return guard;
+        };
+        for (key, value) in env {
+            if let Some(value) = value.as_str() {
+                guard.set(key, value);
+            }
         }
+        guard
+    }
+
+    fn set(&mut self, key: &str, value: &str) {
+        self.saved
+            .push((key.to_string(), std::env::var(key).ok()));
+        std::env::set_var(key, value);
     }
 }
 
-fn unquote(fragment: &str) -> String {
-    let fragment = fragment.trim();
-    let fragment = fragment.strip_prefix('"').unwrap_or(fragment);
-    let fragment = fragment.strip_suffix('"').unwrap_or(fragment);
-    fragment.to_string()
+impl Drop for CaseEnvGuard {
+    fn drop(&mut self) {
+        for (key, previous) in self.saved.drain(..).rev() {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
 }
 
 fn page_base(name: &str) -> String {
@@ -92,9 +104,9 @@ fn corpus_parity_pages_match_goldens() {
         // Mirror the C++ conformance driver: each case's expected.json may
         // declare an injected environment (e.g. the getenv case's
         // PA_CONFORMANCE_ENV), which must be present for @getenv renders.
-        // The declared env is a flat object of strings, so a minimal scanner
-        // suffices (avoids pulling a JSON dependency into the test harness).
-        inject_case_env(&corpus_case(case_id));
+        // The guard injects via serde_json and restores the prior process
+        // environment when the case completes (even on panic).
+        let _env = CaseEnvGuard::from_expected_json(&corpus_case(case_id));
         let project = corpus_case(case_id).join("project");
         let engine = Engine::open(&project)
             .unwrap_or_else(|e| panic!("{case_id}: open failed: {:?}", e.message));
@@ -335,4 +347,48 @@ fn contract_dependencies_are_recorded() {
     let result = engine.render_page("404", &Context::new()).unwrap();
     assert!(!result.dependencies.contains(".nift/config.json"));
     assert!(!result.dependencies.contains("content/site.json"));
+}
+
+#[test]
+fn case_env_guard_parses_full_json_values_and_restores() {
+    // 1. An env value containing a comma, a colon and an escaped quote must be
+    //    read back exactly (the manual scanner this replaces would split on
+    //    the comma and colon and mis-handle the escape).
+    let dir = std::env::temp_dir().join(format!("nr8-env-guard-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("expected.json"),
+        r#"{"env":{"WEIRD":"a,b: \"c\""},"pages":{}}"#,
+    )
+    .unwrap();
+
+    std::env::remove_var("WEIRD");
+    {
+        let guard = CaseEnvGuard::from_expected_json(&dir);
+        assert_eq!(
+            std::env::var("WEIRD").unwrap_or_default(),
+            "a,b: \"c\"",
+            "comma/colon/escaped-quote env value must be exact"
+        );
+        drop(guard);
+    }
+    assert!(
+        std::env::var("WEIRD").is_err(),
+        "previously-absent variable must be absent again after the guard"
+    );
+
+    // 2. A pre-existing variable is restored to its prior value.
+    std::env::set_var("WEIRD", "original");
+    {
+        let guard = CaseEnvGuard::from_expected_json(&dir);
+        assert_eq!(std::env::var("WEIRD").unwrap_or_default(), "a,b: \"c\"");
+        drop(guard);
+    }
+    assert_eq!(
+        std::env::var("WEIRD").unwrap_or_default(),
+        "original",
+        "pre-existing value must be restored after the guard"
+    );
+    std::env::remove_var("WEIRD");
+    let _ = std::fs::remove_dir_all(&dir);
 }

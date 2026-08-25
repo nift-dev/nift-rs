@@ -140,3 +140,51 @@ test harness to inject each case's declared env (mirroring the driver).
 
 cargo test: all suites green (181 tests, 0 failures), including
 corpus_parity_pages_match_goldens and the 5 repair_parity tests.
+
+## CP5.2 correction (reviewer HOLD): getenv harness env handling
+
+### Env parser implementation
+
+`CaseEnvGuard::from_expected_json` replaces the ad-hoc string scanner with
+`serde_json` (already a dev-dependency): it parses `<case>/expected.json` as
+real JSON and injects the declared `env` object (string values) into the
+process environment. Values containing commas, colons, escaped quotes,
+backslashes and unicode escapes are read back exactly.
+
+### Restoration strategy
+
+The guard is RAII: it saves the previous value (or absence) of each injected
+key, sets the declared values, and restores the exact prior state on Drop -
+removing a variable again if it did not exist before, restoring the prior value
+otherwise. Restoration runs even if a render assertion panics (Drop during
+unwinding), so corpus cases cannot leak environment state or become
+order-dependent.
+
+### Test-parallelism finding
+
+Audited all environment-mutating tests:
+- `nr8_project_engine` corpus test: PA_CONFORMANCE_ENV injection (now guarded).
+- `nr10_differential` sets `NIFT_DIFF_KEY` once at the start of its single
+  differential test (separate test binary, not restored).
+- All other tests use the engine-scoped `set_environment_provider` (no process
+  environment mutation).
+
+Cargo runs different test binaries as separate processes, so cross-binary
+environment state is isolated; within each binary, the env-mutating test is the
+sole mutator of its variable, so there is no intra-binary race. A cross-binary
+mutex is therefore unnecessary (and impossible across processes); the guard
+provides per-binary determinism. `nr10`'s NIFT_DIFF_KEY is the only remaining
+unrestored process-env mutation, isolated in its own process.
+
+### New harness cases
+
+`case_env_guard_parses_full_json_values_and_restores`: an env value containing
+a comma, a colon and an escaped quote is injected and read back exactly; a
+previously-absent variable is absent again after the guard; a pre-existing
+variable is restored to its prior value.
+
+### Complete cargo test result
+
+182 tests, 0 failures (incl. corpus_parity_pages_match_goldens,
+case_env_guard_parses_full_json_values_and_restores, and the 5 repair_parity
+tests).
