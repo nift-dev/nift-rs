@@ -5,12 +5,13 @@
 //!
 //! Deterministic interleave (no sleeps): the pagination template renders
 //! `@getenv("BARRIER")` on every page, so the environment provider callback
-//! fires inside the page-assembly loop -- after the snapshot was captured and
-//! page 1 was composed. The provider blocks on a condvar; the test thread
-//! observes "entered", reloads generation B, then releases the barrier. Every
-//! page also renders `$[title]` (a snapshot value), so a result that mixed
-//! generations would show GEN-A on some pages and GEN-B on others. The single
-//! result must be entirely GEN-A and the next render entirely GEN-B.
+//! fires during pagination assembly -- after the render has captured its
+//! project snapshot and before the complete multi-page RenderResult has been
+//! assembled. The provider blocks on a condvar; the test thread observes
+//! "entered", reloads generation B, then releases the barrier. Every page also
+//! renders `$[title]` (a snapshot value), so a result that mixed generations
+//! would show GEN-A on some pages and GEN-B on others. The single result must
+//! be entirely GEN-A and the next render entirely GEN-B.
 
 use nift::context::Context;
 use nift::{Engine, RenderResult};
@@ -67,15 +68,6 @@ fn write_file(path: &Path, contents: &str) {
         std::fs::create_dir_all(parent).expect("create parent");
     }
     std::fs::write(path, contents).expect("write file");
-}
-
-fn write_file_atomic(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create parent");
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, contents).expect("write tmp");
-    std::fs::rename(&tmp, path).expect("rename over target");
 }
 
 fn tracked_with_title(title: &str) -> String {
@@ -152,7 +144,7 @@ fn concurrent_reload_single_snapshot() {
         // Render is deterministically inside the pagination loop now.
         barrier.wait_entered();
         // Publish generation B while the render is mid-flight.
-        write_file_atomic(&root.join(".nift/tracked.json"), &tracked_with_title("GEN-B"));
+        write_file(&root.join(".nift/tracked.json"), &tracked_with_title("GEN-B"));
         engine.reload().expect("reload generation B");
         barrier.release();
         render.join().expect("render thread")
@@ -178,7 +170,7 @@ fn failed_reload_retains_last_good() {
     assert!(result_is_entirely(&first, "GEN-A", "GEN-B", true));
 
     // Disk becomes invalid; reload must fail and retain generation A.
-    write_file_atomic(&root.join(".nift/tracked.json"), "{ not json");
+    write_file(&root.join(".nift/tracked.json"), "{ not json");
     assert!(engine.reload().is_err());
     assert!(engine.is_open());
 
@@ -186,7 +178,7 @@ fn failed_reload_retains_last_good() {
     assert!(result_is_entirely(&after_failed, "GEN-A", "GEN-B", true), "last-good lost");
 
     // A later valid reload recovers; the next render observes the new generation.
-    write_file_atomic(&root.join(".nift/tracked.json"), &tracked_with_title("GEN-C"));
+    write_file(&root.join(".nift/tracked.json"), &tracked_with_title("GEN-C"));
     engine.reload().expect("reload recovery");
     let recovered = engine.render_page("blog", &Context::new()).expect("render");
     assert!(result_is_entirely(&recovered, "GEN-C", "GEN-A", true), "recovery not entirely C");
