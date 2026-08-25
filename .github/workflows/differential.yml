@@ -58,8 +58,8 @@ jobs:
             tests/engine_harness.cpp \
             src/Engine.o src/Context.o src/Value.o src/FileSystem.o src/JsonFile.o \
             src/JsonSchema.o minifypp/src/Minify.o src/Parser.o src/ProjectInfo.o \
-            src/ProjectRead.o src/ProjectState.o src/WatchList.o src/BuildProgress.o \
-            -pthread -o .build/engine-harness
+            src/ProjectOwnership.o src/ProjectRead.o src/ProjectState.o src/WatchList.o \
+            src/BuildProgress.o -pthread -o .build/engine-harness
       - name: Build nift-embed objects on Windows
         if: runner.os == 'Windows'
         shell: msys2 {0}
@@ -73,8 +73,8 @@ jobs:
             tests/engine_harness.cpp \
             src/Engine.o src/Context.o src/Value.o src/FileSystem.o src/JsonFile.o \
             src/JsonSchema.o minifypp/src/Minify.o src/Parser.o src/ProjectInfo.o \
-            src/ProjectRead.o src/ProjectState.o src/WatchList.o src/BuildProgress.o \
-            -pthread -static -municode -o .build/engine-harness
+            src/ProjectOwnership.o src/ProjectRead.o src/ProjectState.o src/WatchList.o \
+            src/BuildProgress.o -pthread -static -municode -o .build/engine-harness
       - name: Build Rust harness
         shell: bash
         run: |
