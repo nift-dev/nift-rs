@@ -80,9 +80,10 @@ cross_format_adversarial.sh        cross-format isolation           covered by d
 fuzz_smoke.cpp                     mutation robustness              REPLACED by crates/minify/tests/property_campaign.rs
                                                                      (deterministic xorshift mutation, 28,000 generated
                                                                      inputs / 7 formats)
-minify_css_postcss_semantics.sh    CSS semantic validation          covered by structural CSS oracle + smoke semantic checks
-                                                                     (a Node/PostCSS oracle is future work if postcss is
-                                                                     vendored)
+minify_css_postcss_semantics.sh    CSS semantic validation          REPRODUCED against minify-rs using the actual PostCSS
+                                                                     semantic-tree comparison (scripts/minify_css_postcss_
+                                                                     semantics.sh): 15/15 stylesheets pass. Structural CSS
+                                                                     checks retained as additional evidence.
 minify_format_idempotence.sh       idempotence                      covered by property campaign (minify(minify(x))==x)
                                                                      + smoke idempotence cases
 minify_generated_semantics.sh      generated JS semantic cases      covered by scripts/minify_semantic_oracle.sh
