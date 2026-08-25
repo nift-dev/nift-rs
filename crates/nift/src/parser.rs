@@ -302,11 +302,17 @@ fn assemble_pagination_pages(
             }
         }
     };
-    let page_source = host.read_source(&pagination_template).map_err(|_| {
-        RenderError::new(
-            ErrorKind::Render,
-            "pagination template is missing, unreadable, or outside the project",
-        )
+    // NotFound -> canonical missing/unreadable pagination-template diagnostic;
+    // a host Error must preserve its own diagnostic (Error != NotFound).
+    let page_source = host.read_source(&pagination_template).map_err(|error| {
+        if error.kind == ErrorKind::MissingSource {
+            RenderError::new(
+                ErrorKind::Render,
+                "pagination template is missing, unreadable, or outside the project",
+            )
+        } else {
+            error
+        }
     })?;
 
     let mut pages = Vec::with_capacity(total);

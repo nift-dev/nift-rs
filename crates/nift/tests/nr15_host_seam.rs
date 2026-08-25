@@ -323,3 +323,131 @@ fn pagination_error_selection_is_page_order() {
     assert!(message.contains("error-one"), "{message}");
     assert!(!message.contains("error-two"), "{message}");
 }
+
+// --- Pagination-template host-error parity --------------------------------
+
+struct PaginationTemplateProbeHost<'a> {
+    state: &'a ProjectState,
+    outcome: SeparatorOutcome,
+}
+
+impl<'a> RenderHost for PaginationTemplateProbeHost<'a> {
+    fn binding(&self, _name: &str) -> Option<&Value> {
+        None
+    }
+    fn root(&self) -> &std::path::Path {
+        self.state.root()
+    }
+    fn relative(&self, path: &std::path::Path) -> String {
+        self.state.relative(path)
+    }
+    fn content_path(&self, identity: &RenderIdentity) -> std::path::PathBuf {
+        let config = self.state.config();
+        match &identity.name {
+            Some(name) => match self.state.find(name) {
+                Some(info) => self.state.content_path(info),
+                None => self
+                    .state
+                    .root()
+                    .join(&config.content_dir)
+                    .join(format!("{}{}", name, config.content_ext)),
+            },
+            None => self.state.root().join(&config.content_dir),
+        }
+    }
+    fn output_path(&self, identity: &RenderIdentity) -> std::path::PathBuf {
+        let config = self.state.config();
+        match &identity.name {
+            Some(name) => match self.state.find(name) {
+                Some(info) => self.state.output_path(info),
+                None => self
+                    .state
+                    .root()
+                    .join(&config.output_dir)
+                    .join(format!("{}{}", name, config.output_ext)),
+            },
+            None => self.state.root().join(&config.output_dir),
+        }
+    }
+    fn source_exists(&self, path: &std::path::Path) -> bool {
+        self.is_pagination_template(path) || self.state.read_shared_source(path).is_some()
+    }
+    fn source_readable(&self, path: &std::path::Path) -> bool {
+        self.is_pagination_template(path) || self.state.read_shared_source(path).is_some()
+    }
+    fn read_source(&self, path: &std::path::Path) -> Result<Cow<'_, str>, RenderError> {
+        if self.is_pagination_template(path) {
+            return match &self.outcome {
+                SeparatorOutcome::Error(message) => {
+                    Err(RenderError::new(ErrorKind::Render, message.to_string()))
+                }
+                SeparatorOutcome::FoundEmpty => Ok(Cow::Owned(String::new())),
+                SeparatorOutcome::NotFound => Err(RenderError::new(
+                    ErrorKind::MissingSource,
+                    "pagination template missing",
+                )),
+            };
+        }
+        match self.state.read_shared_source(path) {
+            Some(source) => Ok(Cow::Owned(source.to_string())),
+            None => Err(RenderError::new(
+                ErrorKind::MissingSource,
+                format!("source file is not readable: {}", path.display()),
+            )),
+        }
+    }
+}
+
+impl PaginationTemplateProbeHost<'_> {
+    fn is_pagination_template(&self, path: &std::path::Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.contains(".paginate.html"))
+            .unwrap_or(false)
+    }
+}
+
+#[test]
+fn pagination_template_host_error_preserves_diagnostic() {
+    let root = temp_dir("pgtmpl");
+    let state = separator_project(&root);
+    let info = state.find("blog").expect("blog");
+    let identity = RenderIdentity {
+        name: Some(info.name.clone()),
+        title: Some(info.title.clone()),
+        template_path: if info.template_path.is_empty() {
+            None
+        } else {
+            Some(info.template_path.clone())
+        },
+    };
+    let paginate = PaginationConfig {
+        items_per_page: 1,
+        template_path: None,
+        separator_path: None,
+    };
+
+    // Error -> the host diagnostic survives.
+    let error_host = PaginationTemplateProbeHost {
+        state: &state,
+        outcome: SeparatorOutcome::Error("pagination template backend failed"),
+    };
+    let failed = render_tracked(&error_host, &identity, Some(&paginate));
+    let failed_message = failed.unwrap_err().message;
+    assert!(
+        failed_message.contains("pagination template backend failed"),
+        "{failed_message}"
+    );
+
+    // NotFound -> canonical missing/unreadable pagination-template diagnostic.
+    let notfound_host = PaginationTemplateProbeHost {
+        state: &state,
+        outcome: SeparatorOutcome::NotFound,
+    };
+    let missing = render_tracked(&notfound_host, &identity, Some(&paginate));
+    let missing_message = missing.unwrap_err().message;
+    assert!(
+        missing_message.contains("pagination template is missing, unreadable, or outside the project"),
+        "{missing_message}"
+    );
+}
