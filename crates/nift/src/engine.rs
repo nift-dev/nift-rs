@@ -304,6 +304,29 @@ impl Engine {
         self.render_inner(partial, None, context)
     }
 
+    /// Render a standalone filesystem source (the file at `path`) as a
+    /// partial. The path is ALWAYS a filesystem path: a missing path is a
+    /// controlled missing-path error and is never reinterpreted as literal
+    /// template text.
+    pub fn render_path(
+        &self,
+        path: impl Into<std::path::PathBuf>,
+        context: &Context,
+    ) -> Result<RenderResult, RenderError> {
+        self.render_partial(&Source::path(path), context)
+    }
+
+    /// Render the supplied bytes as a standalone in-memory source (partial).
+    /// The text is ALWAYS template source: it is never checked against the
+    /// filesystem, so it cannot be misinterpreted as a page or path name.
+    pub fn render_text(
+        &self,
+        text: impl Into<String>,
+        context: &Context,
+    ) -> Result<RenderResult, RenderError> {
+        self.render_partial(&Source::text(text), context)
+    }
+
     fn render_inner(
         &self,
         page: &Source,
