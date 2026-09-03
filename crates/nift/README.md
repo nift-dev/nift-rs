@@ -48,6 +48,16 @@ let result = engine.render(
   transactional `reload` with last-good retention, and concurrent renders.
 - Zero `unsafe` (`#![forbid(unsafe_code)]`).
 
+The crate reads existing Nift projects but does not implement the `nift init`
+or build CLI. The shared CLI terminology contract calls tracked outputs
+**files**, so a future Rust build command must report summaries such as
+`3 files built successfully`, and status must describe `tracked files` rather
+than `tracked pages`. Current
+project conventions keep ordinary CSS, JavaScript and other static
+assets directly in the configured output tree without tracked entries. The Rust
+engine continues to support deliberately tracked/generated text assets because
+that remains part of the project format and rendering contract.
+
 ## Conformance
 
 This is an independent implementation of the Nift semantic contract, gated by
